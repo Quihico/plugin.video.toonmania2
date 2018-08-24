@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<settings>
+    <category label="Interface">
+        <setting id="show_thumbnails" label="Show Thumbnails" type="bool"  default="true"/>
+        <setting id="use_grid" label="Use Grid Layout for Shows" type="bool"  default="false"/>
+	</category>
+</settings>
