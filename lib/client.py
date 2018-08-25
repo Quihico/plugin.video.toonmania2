@@ -3,7 +3,7 @@ import re
 import sys
 import json
 import requests
-from time import time
+from datetime import datetime
 from bs4 import BeautifulSoup
 from urllib import urlencode
 from base64 import b64decode
@@ -11,7 +11,7 @@ from string import ascii_uppercase
 from itertools import chain, islice
 try:
     # Python 2.7
-    from urlparse import parse_qs
+    from urlparse import parse_qs, urlparse
     from HTMLParser import HTMLParser
 except ImportError:
     # Python 3
@@ -24,8 +24,10 @@ import xbmcaddon
 import xbmcplugin
 
 from lib.common import (
+    setWindowProperty,
     getWindowProperty,
-    setWindowProperty
+    getRawWindowProperty,
+    setRawWindowProperty
 )
 #from lib.simpletvdb import tvdb # Unused. Potentially get per-episode thumbnails and descriptions in the future.
 #from lib.simplecache import cache # Unused for now. Cache to spare the website from excessive requests...
@@ -33,6 +35,7 @@ from lib.requesthelper import requestHelper
 
 # Persistent memory properties used to hold the catalog path (the website "area" being displayed) and
 # the catalog of items itself, with sections and items. See catalogFromIterable() for more info.
+PROPERTY_CATALOG_API = 'toonmania2.catalogAPI'
 PROPERTY_CATALOG_PATH = 'toonmania2.catalogPath'
 PROPERTY_CATALOG = 'toonmania2.catalog'
 
@@ -41,23 +44,30 @@ HTML_PARSER = HTMLParser()
 addon = xbmcaddon.Addon()
 #ADDON_ICON_PATH = addon.getAddonInfo('icon')
 ADDON_SHOW_THUMBS = addon.getSetting('show_thumbnails') == 'true'
+ADDON_PAGE_SIZE = int(addon.getSetting('page_size')) # Page size = number of items per catalog section page.
 ADDON_USE_GRID = addon.getSetting('use_grid') == 'true'
 
-# Page size = number of items per catalog section page.
-# CAREFUL not to be greedy. The larger the pages, the more thumbnail requests will be done at once to the websites.
-CATALOG_PAGE_SIZE = 30 # Default: 30 items per page, with 1 request per item (for Kodi thumbnail).
+# The larger the item pages, the more Kodi thumbnail requests will be done at once to the websites.
 API_REQUEST_DELAY = 200 # In milliseconds, waited between each add-on request (used for resolving stream URLs).
 
 
+class Provider:
+    def __init__(self):
+        self.name = ''
+        self.streams = [ ]
+
+
 # Resolving not available for these right now, they need to be researched on how to solve.
-UNSUPPORTED_PROVIDERS = {'cheesestream.com','4vid.me','video66.org','videobug.net', 'videofun.me', 'vidzur.com'}
-# Separating supported providers in groups according to their url resolving method.
+# 'cheesestream.com','4vid.me','video66.org','videobug.net', 'videofun.me', 'vidzur.com'.
+
+# "Mostly" supported providers.
 SUPPORTED_PROVIDERS = {
-    'videozoo.me', 'videozoome', 'videozoo', # All of these variants exist...
+    'videozoo.me', 'videozoome', 'videozoo', # All of these variants come up in the URLs...
     'play44.net', 'play44net', 'play44',
     'easyvideo.me', 'easyvideome', 'easyvideo',
     'playbb.me', 'playbbme', 'playbb',
     'playpanda.net', 'playpandanet', 'playpanda'
+    'videowing'
 }
 
 
@@ -84,7 +94,13 @@ def viewMenu(params):
 
 
 def viewSettings(params):
+    # Open the settings dialog.
     addon.openSettings()
+    # This dialog is modal. The program won't continue from this point until user closes\confirms it.
+    # So it's a good time to update the globals.
+    ADDON_SHOW_THUMBS = addon.getSetting('show_thumbnails') == 'true'
+    ADDON_PAGE_SIZE = int(addon.getSetting('page_size'))
+    ADDON_USE_GRID = addon.getSetting('use_grid') == 'true'
 
 
 def viewAnimetoonMenu(params):
@@ -97,8 +113,8 @@ def viewAnimetoonMenu(params):
 
     listItems = (
         #_animetoonItem('CATALOG_MENU', 'lavender', 'Latest Updates', 0, '/GetUpdates/'),
-        # 'Latest Updates' section to be added later. Needs different treatment as it doesn't
-        # have 'description' data for the shows, only id, name, section and 'episodes' (list of episodes added).
+        # 'Latest Updates' section to be added later. Needs different treatment as it doesn't have a
+        # description field for the shows, only id, name, section and 'episodes' (list of episodes added).
 
         _animetoonItem('CATALOG_MENU', 'darkorange', 'New Movies', 0, '/GetNewMovies'),
         _animetoonItem('CATALOG_MENU', 'darkorange', 'All Movies', 0, '/GetAllMovies'),
@@ -223,28 +239,23 @@ def setupListItem(item, showTitle, title, isPlayable, season, episode, thumb = '
 '''
 The catalog is a dictionary of lists of lists, used to store data between add-on states to make xbmcgui.ListItems:
 {
-    (1. Sections, as in alphabet sections for list items: #, A, B, C, D, E, F etc., each section holds a tuple of pages.)
+    (1. Sections, as in alphabet sections for list items: #, A, B, C, D, E, F etc., each section holds a tuple of items.)
     A: (
-        page1, (2. Each page is a tuple holding items, or empty.)
-        page2, (item, item, item, ...)     (3. Items, each item is a tuple: (id, name, description).)
-        page3
+        item, item, item, ...    (2. Items, each item is a tuple: (id, name, description).)
     )
     B: (...)
     C: (...)
 }
 '''
-
-# Splits items from an iterable into an alphabetised catalog, w/ above format.
+# Splits items from an iterable into an alphabetised catalog, of the format above.
 def catalogFromIterable(iterable):
-    catalog = {key: [ [ ] ] for key in ascii_uppercase + '#'}
+    catalog = {key: [ ] for key in ascii_uppercase + '#'}
     for item in iterable:
         # item = tuple(id, name, description) -> all str values.
         itemKey = item[1][0].upper()
-        section = catalog[itemKey] if itemKey in catalog else catalog['#']
-        currentPage = section[-1]
-        currentPage.append(item) if len(currentPage) < CATALOG_PAGE_SIZE else section.append( [item] )
+        catalog[itemKey if itemKey in catalog else '#'].append(item)
     return catalog
-
+    
 
 def genericCatalog(params):
     requestHelper.setAPISource(int(params['api']))
@@ -264,11 +275,13 @@ def getCatalogProperty(params):
         setWindowProperty(PROPERTY_CATALOG, catalog)
         return catalog
 
-    # If these properties are empty (like when coming in from a favourites menu), or if
-    # a different catalog (a different website area) is stored in this property, then reload it.
-    currentPath = getWindowProperty(PROPERTY_CATALOG_PATH)
-    if currentPath != params['route']:
-        setWindowProperty(PROPERTY_CATALOG_PATH, params['route'])
+    # If these properties are empty (like when coming in from a favourites menu), or if a different
+    # catalog (a different website area) or different API was stored in this property, then reload it.
+    currentAPI = getRawWindowProperty(PROPERTY_CATALOG_API)
+    currentPath = getRawWindowProperty(PROPERTY_CATALOG_PATH)
+    if currentAPI != params['api'] or currentPath != params['route']:
+        setRawWindowProperty(PROPERTY_CATALOG_API, params['api'])
+        setRawWindowProperty(PROPERTY_CATALOG_PATH, params['route'])
         catalog = _buildCatalog()
     else:
         catalog = getWindowProperty(PROPERTY_CATALOG)
@@ -295,7 +308,7 @@ def viewCatalogMenu(params):
             xbmcgui.ListItem(sectionName),
             True
         )
-        for sectionName in sorted(catalog.iterkeys()) if len(catalog[sectionName][0]) > 0
+        for sectionName in sorted(catalog.iterkeys()) if len(catalog[sectionName]) > 0
     )
     xbmcplugin.addDirectoryItems(int(sys.argv[1]), (sectionAll,) + tuple(listItems))
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
@@ -305,13 +318,15 @@ def viewCatalogMenu(params):
 
 
 def viewCatalogSection(params):
-    xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
+    if ADDON_USE_GRID:
+        xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
+
     catalog = getCatalogProperty(params)
 
     def _catalogSectionItems(iterable):
         api = int(params['api'])
+        
         if ADDON_SHOW_THUMBS:
-
             requestHelper.setAPISource(api) # Set the API base URL (and headers) to retrieve the thumb URLs.
 
             for entry in iterable:
@@ -342,22 +357,23 @@ def viewCatalogSection(params):
 
     if ADDON_SHOW_THUMBS:
         # Display items in pages so the thumbs are loaded in chunks to not overburden the source website.
+        
         page = int(params['page']) # Zero-based index.
+        start = page * ADDON_PAGE_SIZE
+        stop = start + ADDON_PAGE_SIZE
+        
         if sectionName == 'ALL':
             # Create pages for the pseudo-section "ALL":
-            # Flatten all sections into a list, then flatten all pages into
-            # another list, which is then isliced to get the current directory page.
-            start = page * CATALOG_PAGE_SIZE
-            stop = start + CATALOG_PAGE_SIZE
+            # Flatten all sections into a list, which is then isliced to get the current directory page.
             flatSections = chain.from_iterable(catalog[sName] for sName in sorted(catalog.iterkeys()))
             itemsIterable = (
-                entry for entry in (pageEntry for pageEntry in islice(chain.from_iterable(flatSections), start, stop))
+                entry for entry in islice(flatSections, start, stop)
             )
-            totalSectionPages = sum(len(page) for page in chain.from_iterable(catalog.itervalues())) // CATALOG_PAGE_SIZE
+            totalSectionPages = sum(len(section) for section in catalog.itervalues()) // ADDON_PAGE_SIZE
         else:
             # Use one of the premade pages.
-            itemsIterable = (entry for entry in catalog[sectionName][page])
-            totalSectionPages = len(catalog[sectionName])
+            itemsIterable = (entry for entry in islice(catalog[sectionName], start, stop))
+            totalSectionPages = len(catalog[sectionName]) // ADDON_PAGE_SIZE
 
         page += 1
         if totalSectionPages > 1 and page < totalSectionPages:
@@ -365,38 +381,47 @@ def viewCatalogSection(params):
             nextPage = (buildURL(params), xbmcgui.ListItem('Next Page ('+str(page+1)+'/'+str(totalSectionPages)+')'), True)
             xbmcplugin.addDirectoryItems(int(sys.argv[1]), tuple(_catalogSectionItems(itemsIterable)) + (nextPage,))
         else:
+            xbmcplugin.addSortMethod(int(sys.argv[1]), xbmcplugin.SORT_METHOD_LABEL_IGNORE_THE)
             xbmcplugin.addDirectoryItems(int(sys.argv[1]), tuple(_catalogSectionItems(itemsIterable)))
     else:
         if sectionName == 'ALL':
             allSections = chain.from_iterable(catalog[sName] for sName in sorted(catalog.iterkeys()))
-            itemsIterable = (entry for page in allSections for entry in page)
+            itemsIterable = (entry for entry in allSections)
         else:
-            allPages = chain.from_iterable(page for page in catalog[sectionName])
-            itemsIterable = (entry for entry in allPages)
+            itemsIterable = (entry for entry in catalog[sectionName])
+        xbmcplugin.addSortMethod(int(sys.argv[1]), xbmcplugin.SORT_METHOD_LABEL_IGNORE_THE)
         xbmcplugin.addDirectoryItems(int(sys.argv[1]), tuple(_catalogSectionItems(itemsIterable)))
 
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
     if ADDON_USE_GRID:
-        xbmc.executebuiltin('Container.SetViewMode(54)')
+        xbmc.executebuiltin('Container.SetViewMode(54)') # InfoWall.
+    else:
+        xbmc.executebuiltin('Container.SetViewMode(55)') # WideList.
 
 
+# Pages aren't necessary in the episode lists because they all use the same thumb and plot.        
 def viewListEpisodes(params):
-    xbmcplugin.setContent(int(sys.argv[1]), 'episodes')
+    if ADDON_USE_GRID:
+        xbmcplugin.setContent(int(sys.argv[1]), 'episodes') # Changes the skin layout.
+        
+    # Doesn't feel necessary.
+    #xbmcplugin.addSortMethod(int(sys.argv[1]), xbmcplugin.SORT_METHOD_LABEL_IGNORE_THE)
 
     requestHelper.setAPISource(int(params['api']))
     jsonData = requestHelper.routeGET('/GetDetails/' + params['id'])
 
-    def _listEpisodesItems(data):
-        episodes = data['episode'] if 'episode' in data else data['episodes']
+    def _listEpisodesItems():
+        episodes = jsonData['episode'] if 'episode' in jsonData else jsonData['episodes']
         api = params['api']
         plot = params['plot']
         thumb = params.get('thumbURL', '')
+
         for episodeEntry in episodes:
             #episode = dict( id=str, name=str, date='yyyy-MM-dd (...)' )
             name = episodeEntry['name']
             item = xbmcgui.ListItem(name)
             season, episode = getTitleInfo(name)
-            showTitle = data.get('name', name) # Try the entry title first, then episode name if it fails.
+            showTitle = jsonData.get('name', name) # Try the entry title first, then episode name if it fails.
             setupListItem(item, showTitle, name, True, season, episode, thumb, plot)
             yield (
                 buildURL(
@@ -409,82 +434,127 @@ def viewListEpisodes(params):
                         'season': season,
                         'episode': episode,
                         'thumb': thumb,
-                        'plot': plot
+                        'plot': plot.decode('utf-8')
                     }
                 ),
                 item,
                 False
             )
-    xbmcplugin.addDirectoryItems(int(sys.argv[1]), tuple(_listEpisodesItems(jsonData)))
+
+    episodeList = tuple(_listEpisodesItems())
+    if len(episodeList) == 1:
+        # This is probably a movie, OVA or special.
+        # Change the view type to resolve into separate parts.
+        episodeList[0][1].setProperty('IsPlayable', 'false')
+        xbmcplugin.addDirectoryItem(
+            int(sys.argv[1]),
+            episodeList[0][0].replace('view=RESOLVE', 'view=LIST_PARTS'),
+            episodeList[0][1],
+            True
+        )
+    else:
+        xbmcplugin.addDirectoryItems(int(sys.argv[1]), episodeList)
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
 
 
-def resolve(params):
+def resolveEpisodeStreams(api, episodeID):
+    def _processProvider(providerURLs):
+        # This function will get a list of stream URLs, one list per provider.
+        # Try to get the provider name (to see if we support resolving it).
+        newProvider = Provider()
 
-    def _getStreamURLs(providerURLs):
-        # This function will get a list of URLs, one list per provider.
         firstURL = providerURLs[0]
         if firstURL.startswith('http://'):
-            providerName = firstURL.replace('http://','').split('.')[0]
+            firstURL = firstURL.replace('http://', '')
         elif firstURL.startswith('https://'):
-            providerName = firstURL.replace('https://','').split('.')[0]
+            firstURL = firstURL.replace('https://', '')
 
-        if providerName in UNSUPPORTED_PROVIDERS:
-            return (providerName, [ ])
+        for word in firstURL.split('.'):
+            if word in SUPPORTED_PROVIDERS:
+                newProvider.name = word
+                break
+        else:
+            return newProvider # Return it empty. It's not a supported provider.
 
         # It's usually a single provider url, but there might be more urls for
         # the same provider for entries like movies, which are split in parts.
-        streamURLs = [ ]
         for url in providerURLs:
-            startTime = time()
-
-            anyQualityURL = None
-            if providerName in SUPPORTED_PROVIDERS:
+            startTime = datetime.now()
+            try:
+                temp = None
                 r = requestHelper.GET(url)
                 if r.ok:
                     html = r.text
-                    if 'var video_links =' in html:
-                        # Try the videozoo \ play44 solve:
-                        temp = re.findall(r'video_links\s*=\s*({.*?}\s*\s*}\s*);', r.text, re.DOTALL)
-                        if temp:
-                            sourceData = json.loads(temp[0])
-                            anyQualityURL = sourceData[next(iter(sourceData))]['storage'][0]['link']
-                    elif 'url: \'' in html:
-                        # Try the playpanda.net solve:
-                        temp = re.findall(r'{\s*?url\s*?:\s*?\'(.*?)\'', r.text, re.DOTALL)
-                        if temp:
-                            anyQualityURL = temp[0]
-                    elif 'file: "' in html:
-                        # Try a generic solve:
-                        temp = re.findall(r'file:\s*?"(.*?)"', r.text, re.DOTALL)
-                        if temp:
-                            anyQualityURL = temp[0]
-            if anyQualityURL:
-                streamURLs.append(anyQualityURL)
+                    if 'var video_links' in html:
+                        # Try the generic videozoo \ play44 solve first:
+                        temp = re.findall(r'''var video_links.*?['"]link['"]\s*?:\s*?['"](.*?)['"]''', html, re.DOTALL)
+                    else:
+                        # Try variants:
+                        temp = re.findall(r'''{\s*?url\s*?:\s*?['"](.*?)['"]''', html, re.DOTALL)
+                        if not temp:
+                            temp = re.findall(r'''file\s*?:\s*?['"](.*?)['"]''', html, re.DOTALL)
+                if temp:
+                    newProvider.streams.append(temp[0].replace(r'\/', r'/')) # In case there's escaped JS slashes.
+            except:
+                pass # Probably a request exception, some URLs might be old and broken.
 
-            elapsed = time() - startTime
+            elapsed = int((datetime.now() - startTime).total_seconds()) * 1000
             if elapsed < API_REQUEST_DELAY:
                 xbmc.sleep(int(max(API_REQUEST_DELAY - elapsed, 100))) # In milliseconds.
 
-        # Uncomment the next two lines for debug.
+        # Uncomment the next two lines for debugging failed providers.
         #if not streamURLs:
         #    xbmc.log('Toonmania2 --- Failed resolving provider: '+providerName+' '+str(providerURLs), xbmc.LOGWARNING)
-        return (providerName, streamURLs)
+        return newProvider
 
-    requestHelper.setAPISource(int(params['api']))
-
-    jsonData = requestHelper.routeGET('/GetVideos/' + params['episodeID'])
+    requestHelper.setAPISource(int(api))
+    jsonData = requestHelper.routeGET('/GetVideos/' + episodeID)
     if jsonData:
-        if isinstance(jsonData[0], dict): # Animeplus special case, providerURLs come as dictionaries.
-            providers = (_getStreamURLs( (provider['url'],) ) for provider in jsonData)
+        if isinstance(jsonData[0], dict): # Animeplus special case, URLs might come inside one dictionary each provider.
+            processedProviders = (_processProvider( (provider['url'],) ) for provider in jsonData)
         else:
-            providers = (_getStreamURLs(providerURLs) for providerURLs in jsonData)
-        validProviders = tuple(provider for provider in providers if len(provider[1]))
+            processedProviders = (_processProvider(providerURLs) for providerURLs in jsonData)
+
+        # Each provider is a tuple, with index 0 = providerName, index 1 = list of provider URL(s) (video parts, even if it's one).
+        return (provider for provider in processedProviders if len(provider.streams))
     else:
         return
 
-    if len(validProviders):
 
+def viewListParts(params):
+    validProviders = tuple(resolveEpisodeStreams(params['api'], params['episodeID']))
+
+    def _listPartsItems():
+        for provider in validProviders:
+            for index, stream in enumerate(provider.streams):
+                partName = params['name'] + ' | PART ' + str(index+1) + ')'
+                item = xbmcgui.ListItem('[COLOR lavender][B]%s[/B][/COLOR] | %s' % (provider.name.upper(), partName))
+                setupListItem(
+                    item,
+                    params['showTitle'],
+                    partName,
+                    True,
+                    int(params['season']),
+                    int(params['episode']),
+                    params.get('thumb', ''),
+                    params['plot']
+                )
+                item.setPath(stream)
+                yield (stream, item, False)
+    
+    itemsList = tuple(_listPartsItems())
+    if itemsList:
+        xbmcplugin.addDirectoryItems(int(sys.argv[1]), itemsList)
+    else:
+        from xbmcgui import Dialog
+        dialog = Dialog()
+        dialog.notification('Toonmania2', 'Could not find any stream URLs', xbmcgui.NOTIFICATION_INFO, 3000, False)
+    xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+
+def viewResolve(params):
+    validProviders = tuple(resolveEpisodeStreams(params['api'], params['episodeID']))
+    if len(validProviders):
         item = xbmcgui.ListItem(params['name'])
         setupListItem(
             item,
@@ -496,19 +566,24 @@ def resolve(params):
             params.get('thumb', ''),
             params['plot']
         )
-        selectedIndex = xbmcgui.Dialog().select('Select Provider', tuple(provider[0] for provider in validProviders))
+        selectedIndex = xbmcgui.Dialog().select('Select Provider', tuple(provider.name for provider in validProviders))
         if selectedIndex != -1:
-            # See if the provider has more than one stream url so we need to set up a playlist.
-            streamURLs = validProviders[selectedIndex][1] # [0] = providerName, [1] = provider URL(s).
-            if len(streamURLs) > 1:
+            item.setPath(validProviders[selectedIndex].streams[0])
+            xbmcplugin.setResolvedUrl(int(sys.argv[1]), True, item)
+
+            # Failed attempt at trying to autoplay all multi-part videos
+            # using a XBMC video playlist. Using directories seems safer.
+            '''if len(streamURLs) > 1:
+                player = xbmc.Player()
+                for wait in range(60): # Wait at most 60 seconds for the video to start playing.
+                    if player.isPlayingVideo():
+                        break
+                    xbmc.sleep(1000)
                 playlist = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
-                playlist.clear()
-                for stream in streamURLs[1:]:
-                    playlist.add(stream)
-                xbmc.Player().play(playlist, listitem = item) # Does NOT work for some reason.
-            else:
-                item.setPath(streamURLs[0])
-                xbmcplugin.setResolvedUrl(int(sys.argv[1]), True, item)
+                streams = iter(streamURLs)
+                next(streams) # Skip the first one, already being played.
+                for index, stream in enumerate(streams):
+                    playlist.add(stream, index = index)'''
 
 
 def buildURL(query):
@@ -528,7 +603,8 @@ VIEW_FUNCS = {
     'SEARCH_GENRE': viewSearchGenre,
 
     'LIST_EPISODES': viewListEpisodes,
-    'RESOLVE': resolve
+    'LIST_PARTS': viewListParts,
+    'RESOLVE': viewResolve
 }
 
 
