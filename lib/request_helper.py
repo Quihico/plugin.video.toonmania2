@@ -2,7 +2,6 @@
 import requests
 from datetime import datetime
 
-import xbmc
 from xbmc import sleep
 
 from lib.common import setRawWindowProperty, getRawWindowProperty
@@ -12,31 +11,27 @@ from lib.common import setRawWindowProperty, getRawWindowProperty
 
 class RequestHelper():
 
-    # The larger the item pages, the more Kodi thumbnail requests will be done at once to the websites.
-    # Something to keep in mind.
-    # There's also this hardcoded delay here:
-    API_REQUEST_DELAY = 200 # In millseconds, between each request done to the websites or the JSON api.
-
-    URL_API_ANIMETOON = 'http://api.animetoon.tv'
+    URL_ANIMETOON_API = 'http://api.animetoon.tv'
     URL_ANIMETOON_IMAGES = 'http://www.animetoon.tv/images/series/small/' # Replace 'small' with 'big' to get larger thumbs.
     URL_ANIMETOON_SEARCH = 'http://www.animetoon.org/toon/search?key=%s'
 
-    URL_API_ANIMEPLUS = 'http://api.animeplus.tv'
+    URL_ANIMEPLUS_API = 'http://api.animeplus.tv'
     URL_ANIMEPLUS_IMAGES = 'http://www.animeplus.tv/images/series/small/'
     URL_ANIMEPLUS_SEARCH = 'http://www.animeplus.tv/anime/search?key=%s'
-    
-    # API sources, used with the setAPISource() function.
+
+    # API source constants, used with the setAPISource() function.
     API_ANIMETOON = '0'
     API_ANIMEPLUS = '1'
 
-    # Persistent window property holding the app version obtained from
-    # the '/GetVersion' API route.
-    PROPERTY_VERSION = 'requesthelper.version'
+    # Persistent window properties holding the app versions obtained from
+    # the '/GetVersion' API routes.
+    PROPERTY_ANIMETOON_VERSION = 'requesthelper.toonVersion'
+    PROPERTY_ANIMEPLUS_VERSION = 'requesthelper.plusVersion'
     
     # Stores a persistent random user-agent string, or empty if not used yet.
-    # Used when searching with the regular websites.    
+    # Used when name searching, it needs a desktop header for the website.
     PROPERTY_RANDOM_USERAGENT = 'requesthelper.randomUA'
-    
+
 
     def __init__(self):
         self.animetoonHeaders = {
@@ -44,7 +39,7 @@ class RequestHelper():
             'App-LandingPage': 'http://www.mobi24.net/toon.html',
             'App-Name': '#Toonmania',
             'App-Version': '8.0',
-            'Accept': '*/*'            
+            'Accept': '*/*'
         }
         self.animeplusHeaders = {
             'User-Agent': 'okhttp/2.3.0',
@@ -52,80 +47,128 @@ class RequestHelper():
             'App-Name': '#Animania',
             'App-Version': '8.0',
             'Accept': '*/*'
-        }
-        self.session = requests.Session()
-        self.setAPISource(self.API_ANIMETOON) 
-        
-        latestVersion = getRawWindowProperty(self.PROPERTY_VERSION)
-        if not latestVersion:
-            jsonData = self.routeGET('/GetVersion')
-            latestVersion = jsonData.get('version', '8.0')
-            setRawWindowProperty(self.PROPERTY_VERSION, latestVersion)
-        self.animetoonHeaders.update({'App-Version': latestVersion})
-        self.animeplusHeaders.update({'App-Version': latestVersion})
-            
+        }        
+        self.session = requests.Session()        
+        self.checkAppVersions()
 
-    # Set the API to which the route requests will go:
-    # RequestHelper.ANIMETOON = Cartoons and dubbed anime (api.animetoon.tv),
-    # RequestHelper.ANIMEPLUS = Subbed anime (api.animeplus.tv)
+
     def setAPISource(self, api):
+        '''
+        Called before doing requests to the app routes, it sets up the API URL
+        which the route requests will go to, as well as search and thumb URLs.
+        :param api: The API to change to, it's either RequestHelper.API_ANIMETOON
+        or RequestHelper.API_ANIMEPLUS.
+        '''
         if api == self.API_ANIMETOON:
-            self.apiURL = self.URL_API_ANIMETOON
+            self.apiURL = self.URL_ANIMETOON_API
             self.imageURL = self.URL_ANIMETOON_IMAGES
             self.searchURL = self.URL_ANIMETOON_SEARCH
             self.session.headers.update(self.animetoonHeaders)
         else:
-            self.apiURL = self.URL_API_ANIMEPLUS
+            self.apiURL = self.URL_ANIMEPLUS_API
             self.imageURL = self.URL_ANIMEPLUS_IMAGES
             self.searchURL = self.URL_ANIMEPLUS_SEARCH
             self.session.headers.update(self.animeplusHeaders)
 
+            
+    def checkAppVersions(self):
+        '''
+        Requests and caches the latest version from the apps.
+        Probably avoids the 'Please update your app' reponse to route requests.
 
-    # Used with show\movie name search.            
+        On Kodi < 17.6 this is evaluated at every change of directory...
+        '''
+        toonVersion = getRawWindowProperty(self.PROPERTY_ANIMETOON_VERSION)
+        if not toonVersion:
+            self.setAPISource(self.API_ANIMETOON)
+            self.delayBegin()
+            toonVersion = self.routeGET('/GetVersion').get('version', '8.0')
+            self.delayEnd()
+            setRawWindowProperty(self.PROPERTY_ANIMETOON_VERSION, toonVersion)
+        self.animetoonHeaders.update({'App-Version': toonVersion})
+        
+        plusVersion = getRawWindowProperty(self.PROPERTY_ANIMEPLUS_VERSION)        
+        if not plusVersion:
+                self.setAPISource(self.API_ANIMEPLUS)
+                self.delayBegin()
+                plusVersion = self.routeGET('/GetVersion').get('version', '8.0')
+                self.delayEnd()
+                setRawWindowProperty(self.PROPERTY_ANIMEPLUS_VERSION, plusVersion)                
+        self.animeplusHeaders.update({'App-Version': plusVersion})
+
+        
     def setDesktopHeader(self):
         del self.session.headers['App-LandingPage'] # Delete these app header items, just for safety.
         del self.session.headers['App-Name']
         del self.session.headers['App-Version']
         self.session.headers.update(self.getRandomHeader())
-        
-        
+
+
     def GET(self, url):
-        return self.session.get(url, timeout = 8)
+        return self.session.get(url, timeout = 10)
 
-        
+
     def POST(self, url, data):
-        return self.session.post(url, data = data, timeout = 8) # Unused function so far.
-        
+        '''
+        This function is unused so far.
+        '''
+        return self.session.post(url, data = data, timeout = 10)
 
-    # Convenience function to GET from a route path.
-    # Assumes 'routeURL' starts with a forward slash.
+
     def routeGET(self, routeURL):
+        '''
+        Convenience function to GET from a route path.
+        Assumes 'routeURL' starts with a forward slash.
+        
+        :returns: The JSON of the response.
+        '''
         r = self.GET(self.apiURL + routeURL)
         if r.ok:
             return r.json()
         else:
             return None
 
-            
+
     def searchGET(self, query):
         return self.GET(self.searchURL % query)
 
-    
+
     def makeThumbURL(self, id):
+        '''
+        Returns the appropriate thumbnail image URL based on the current API.
+        '''        
         return self.imageURL + str(id) + '.jpg' # 'imageURL' changes depending on the API set in setAPISource().
+
+
+    def delayBegin(self):
+        '''
+        Called before a request or a code block that includes a request to
+        grab the current time, used for some request delay logic for scraping.
+        '''
+        self.delayStartTime = datetime.now()
+
+
+    def delayEnd(self, delayOverride = 200):
+        '''
+        Called after a request or a code block that included a request. This actually
+        does the delay.
         
-        
-    def apiDelay(self, startTime, delayOverride = 0):
-        elapsed = int((datetime.now() - startTime).total_seconds() * 1000)
-        actualDelay = self.API_REQUEST_DELAY if not delayOverride else delayOverride
-        if elapsed < actualDelay:
-            sleep(max(actualDelay - elapsed, 100))
-            
-        
+        :param delayOverride: Optional custom delay time in milliseconds. Default: 200ms.
+        '''
+        elapsed = int((datetime.now() - self.delayStartTime).total_seconds() * 1000)
+        if elapsed < delayOverride: # Only delay if we haven't waited the full delay time, obviously.
+            sleep(max(delayOverride - elapsed, 100))
+
+
     def getRandomHeader(self):
+        '''
+        Random user-agent logic, thanks to http://edmundmartin.com/random-user-agent-requests-python/
+        
+        :returns: An incomplete desktop header, meant for updating update self.session.headers.
+        '''
         randomUA = getRawWindowProperty(self.PROPERTY_RANDOM_USERAGENT)
         if not randomUA:
-            # Random user-agent logic. Thanks to http://edmundmartin.com/random-user-agent-requests-python/
+            
             from random import choice
             randomUA = choice(self._desktopUserAgents())
             setRawWindowProperty(self.PROPERTY_RANDOM_USERAGENT, randomUA)
@@ -133,8 +176,8 @@ class RequestHelper():
             'User-Agent': randomUA,
             'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,image/webp,*/*;q=0.8'
         }
-        
-        
+
+
     def _desktopUserAgents(self):
         desktop_agents = (
             'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36',
@@ -150,5 +193,5 @@ class RequestHelper():
         )
         return desktop_agents
 
-            
+
 requestHelper = RequestHelper()
