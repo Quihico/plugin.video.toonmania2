@@ -591,7 +591,6 @@ def viewResolve(params):
     Resolves and plays the chosen episode, based on the API and ID supplied in 'params'.
     '''
     if 'p0' in params:
-        xbmc.log(str(params), xbmc.LOGWARNING)
         # This was a multi-video-part item, and it was already resolved by viewListEpisodes().
         # Each 'pn' key leads to a 'providerName_providerURL' value. Split at the first underscore.
         def _readProviders():
