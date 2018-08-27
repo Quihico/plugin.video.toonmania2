@@ -1,7 +1,7 @@
-# Toonmania2 0.3.0
+# Toonmania2 0.3.1
 
 A Kodi video add-on for streaming cartoons and anime from [animetoon](http://www.animetoon.org/) and [animeplus](http://www.animeplus.tv/).  
-Install it from [this zip here](https://github.com/doko-desuka/plugin.video.toonmania2/raw/master/plugin.video.toonmania2-0.3.0.zip) or install it from [my repository](https://github.com/doko-desuka/doko.repository/releases) to get automatic updates.
+Install it from [this zip here](https://github.com/doko-desuka/plugin.video.toonmania2/raw/master/plugin.video.toonmania2-0.3.1.zip) or install it from [my repository](https://github.com/doko-desuka/doko.repository/releases) to get automatic updates.
 
 Pull-requests are always welcome.
 
