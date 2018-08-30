@@ -4,5 +4,7 @@
         <setting id="show_thumbnails" label="Show Thumbnails" type="bool"  default="true"/>
         <setting id="page_size" label="Items per Page" type="slider" option="int" subsetting="true" enable="eq(-1,true)" default="30" range="10,10,150"/>
         <setting id="use_grid" label="Use Grid Layout for Shows" type="bool"  default="false"/>
+        <setting type="lsep" label="Episodes"/>
+        <setting id="use_autoplay" label="Autoplay Any Provider" type="bool"  default="true"/>
 	</category>
 </settings>
