@@ -27,11 +27,21 @@ from Lib.RequestHelper import requestHelper
 from Lib.CatalogHelper import catalogHelper
 
 # Addon user settings. See also the viewSettings() function.
-addon = xbmcaddon.Addon()
-ADDON_SHOW_THUMBS = addon.getSetting('show_thumbnails') == 'true'
-ADDON_PAGE_SIZE = int(addon.getSetting('page_size')) # Page size = number of items per catalog section page.
-ADDON_USE_GRID = addon.getSetting('use_grid') == 'true'
-ADDON_USE_AUTOPLAY = addon.getSetting('use_autoplay') == 'true'
+ADDON = xbmcaddon.Addon()
+ADDON_SETTINGS = dict()
+
+# Dict to help translate 'layout_type_[name]' settings values into 'Container.SetViewMode()' values.
+# These constants were taken from the Estuary skin XML names:
+# https://github.com/xbmc/xbmc/tree/master/addons/skin.estuary/xml
+ADDON_VIEW_MODES = {
+    'Wall' : '500',
+    'Banner': '501',
+    'List' : '50',
+    'Poster' : '51',
+    'Shift' : '53',
+    'InfoWall' : '54',
+    'WideList' : '55'
+}
 
 # Dictionary of "mostly" supported providers, each key is a provider name, each value is a
 # set of variant names for each provider. All these variants come up in the URLs...
@@ -76,12 +86,9 @@ def viewSettings(params):
     '''
     View that pops-up the add-on settings dialog, for convenience.
     '''
-    addon.openSettings() # Modal dialog, so the program won't continue from this point until user closes\confirms it.
+    ADDON.openSettings() # Modal dialog, so the program won't continue from this point until user closes\confirms it.
     # So it's a good time to update the globals.
-    ADDON_SHOW_THUMBS = addon.getSetting('show_thumbnails') == 'true'
-    ADDON_PAGE_SIZE = int(addon.getSetting('page_size'))
-    ADDON_USE_GRID = addon.getSetting('use_grid') == 'true'
-    ADDON_USE_AUTOPLAY = addon.getSetting('use_autoplay') == 'true'
+    reloadAddonSettings()
 
 
 def viewAnimetoonMenu(params):
@@ -135,6 +142,34 @@ def viewAnimeplusMenu(params):
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
 
 
+def _viewSearchResults(params, catalog):
+    '''
+    Sub directory as an intermediary step before showing the search results catalog.
+    This lets you favourite your search results so you can come back to them later.
+    '''
+    # After the search in viewSearchMenu() the catalog should have some items.
+    hasItems = next((True for sectionItems in catalog.itervalues() if len(sectionItems) > 0), False)
+    if hasItems:
+        # Store the search results in the URL, to enable favouriting.
+        # It might become a long URL probably, if it has many items.
+        # TODO: Use file caching for this? (Like storing the search results in a file.)
+        # I have no clue if there's an URL-size-limit on Kodi.
+        params.update(
+            {
+                'view': 'CATALOG_SECTION', # Go straight to the 'ALL' catalog section instead
+                'section': 'ALL',          # instead of the catalog main menu.
+                'page': '0',
+                'route': '_searchResults',
+                'searchData': catalogHelper.dumpCatalogJSON(catalog) # This might be a huge string.
+            }
+        )
+        item = xbmcgui.ListItem(params['query'].strip().capitalize() + ' Search Results')
+        xbmcplugin.addDirectoryItem(int(sys.argv[1]), buildURL(params), item, isFolder=True)
+    else:
+        xbmcplugin.addDirectoryItem(int(sys.argv[1]), '', xbmcgui.ListItem('No Results'), False)
+    xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+
 def viewSearchMenu(params):
     '''
     Directory for a sub menu that lists search options.
@@ -145,11 +180,12 @@ def viewSearchMenu(params):
         kb.doModal()
         return kb.getText() if kb.isConfirmed() else ''
 
-    if params.get('route', '') == '_inputSearch':
+    if params.get('route', None) == '_inputSearch':
         text = _modalKeyboard('Search by Name')
         if text:
-            params.update({'view': 'CATALOG_MENU', 'route': '_executeSearch', 'query': text})
-            viewCatalogMenu(params) # Send the search query for the catalog functions to use.
+            params.update({'route': '_executeSearch', 'query': text})
+            catalog = catalogHelper.getCatalog(params) # Does the actual web search with the 'query' in params.
+            _viewSearchResults(params, catalog) # Sub directory, only available from this directory.
             return
         else:
             # User typed nothing or cancelled the keyboard.
@@ -175,6 +211,8 @@ def viewSearchGenre(params):
     '''
     Directory for a sub menu that lists the available genres to filter items by.
     '''
+    xbmcplugin.setContent(int(sys.argv[1]), 'tvshows') # Optional, influences the skin layout.
+
     api = params['api']
     route = params['route']
 
@@ -209,58 +247,6 @@ def viewSearchGenre(params):
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
 
 
-def getTitleInfo(title):
-    '''
-    Helper function to extract season and episode values based on the title string.
-    It looks for patterns such as "[Show name] Season 2 Episode 5".
-    '''
-    season = episode = 0
-    titleWords = title.lower().split()
-    for index, word in enumerate(titleWords):
-        if word == 'season':
-            try:
-                season = int(titleWords[index+1])
-            except ValueError:
-                pass
-        elif word == 'episode':
-            try:
-                episode = int(titleWords[index+1])
-                if not season:
-                    season = 1 # Season may be omitted in the title.
-                break # The word 'Episode' is always put after the season and show title in the link strings.
-            except ValueError:
-                season = episode = 0 # Malformed \ typo'ed strings caused this?
-    return (season, episode)
-
-
-def setupListItem(item, showTitle, title, isPlayable, season, episode, genres, thumb = '', plot = '', date = ''):
-    '''
-    Helper function to fill in an xbmcgui.ListItem item with metadata info, supplied in the parameters.
-    'genres' might be empty or None.
-    '''
-    if isPlayable:
-        # Allows the checkmark to be placed on watched episodes, as well as some context menu options.
-        item.setProperty('IsPlayable', 'true')
-
-    if thumb:
-        item.setArt({'icon': thumb, 'thumb': thumb, 'poster': thumb})
-
-    # All items are set with 'episode' mediatype even if they aren't, as it looks better w/ the skin layout.
-    itemInfo = {
-        'mediatype': 'episode' if isPlayable else 'tvshow',
-        'tvshowtitle': showTitle,
-        'title': title,
-        'plot': plot,
-        'genre': genres if genres else '',
-        'premiered': date, # According to the docs, 'premiered' is what makes Kodi display a date.
-        'aired': date,
-        'year': date.split('-')[0]
-    }
-    if episode:
-        itemInfo.update({'season': season, 'episode': episode})
-    item.setInfo('video', itemInfo)
-
-
 def viewCatalogMenu(params):
     '''
     Directory for the catalog main menu, showing sections #, A, B, C, D, E... etc.
@@ -272,7 +258,7 @@ def viewCatalogMenu(params):
     catalog = catalogHelper.getCatalog(params)
     api = params['api']
     route = params['route']
-
+        
     listItems = tuple(
         (
             buildURL({'view': 'CATALOG_SECTION', 'api': api, 'route': route, 'section': sectionName, 'page': '0'}),
@@ -294,9 +280,11 @@ def viewCatalogMenu(params):
         xbmcplugin.addDirectoryItem(int(sys.argv[1]), '', xbmcgui.ListItem('No Items Found'), False)
 
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
-    # Always use InfoWall mode (assuming it's Estuary skin, the default skin), in this directory
-    # as it makes it easier to pick a catalog section.
-    xbmc.executebuiltin('Container.SetViewMode(54)')
+
+    # Custom layout settings.
+    useCatalogLayout, layoutType = ADDON_SETTINGS['layoutCatalog']
+    if useCatalogLayout:
+        xbmc.executebuiltin('Container.SetViewMode(' + layoutType + ')')
 
 
 def viewCatalogSection(params):
@@ -304,21 +292,20 @@ def viewCatalogSection(params):
     Directory for listing items from a specific section of the catalog
     (section "C" for example, for C-titled entries).
     '''
-    if ADDON_USE_GRID:
-        xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
+    xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
 
     catalog = catalogHelper.getCatalog(params)
 
     def _catalogSectionItems(iterable):
         api = params['api']
 
-        if ADDON_SHOW_THUMBS:
+        if ADDON_SETTINGS['showThumbs']:
             requestHelper.setAPISource(api) # Sets the right base thumb URL for the makeThumbURL() below.
 
         for entry in iterable:
             # entry = (id, name, description, genres, dateReleased), see CatalogHelper.makeCatalogEntry() for more info.
             item = xbmcgui.ListItem(entry[1])
-            thumb = requestHelper.makeThumbURL(entry[0]) if ADDON_SHOW_THUMBS else ''
+            thumb = requestHelper.makeThumbURL(entry[0]) if ADDON_SETTINGS['showThumbs'] else ''
             date = entry[4]
             setupListItem(item, entry[1], entry[1], False, 0, 0, entry[3], thumb = thumb, plot = entry[2], date = date)
             yield (
@@ -339,23 +326,24 @@ def viewCatalogSection(params):
 
     sectionName = params['section']
 
-    if ADDON_SHOW_THUMBS:
+    if ADDON_SETTINGS['showThumbs']:
         # Display items in pages so the thumbs are loaded in chunks to not overburden the source website.
 
         page = int(params['page']) # Zero-based index.
-        start = page * ADDON_PAGE_SIZE
-        stop = start + ADDON_PAGE_SIZE
+        pageSize = ADDON_SETTINGS['pageSize']
+        start = page * pageSize
+        stop = start + pageSize
 
         if sectionName == 'ALL':
             # Create pages for the pseudo-section "ALL":
             # Flatten all sections into an iterable, which is then islice'd to get the current directory page.
             flatSections = chain.from_iterable(catalog[sName] for sName in sorted(catalog.iterkeys()))
             itemsIterable = (entry for entry in islice(flatSections, start, stop))
-            totalSectionPages = sum(len(section) for section in catalog.itervalues()) // ADDON_PAGE_SIZE
+            totalSectionPages = sum(len(section) for section in catalog.itervalues()) // pageSize
         else:
             # Do an islice of a specific section.
             itemsIterable = (entry for entry in islice(catalog[sectionName], start, stop))
-            totalSectionPages = len(catalog[sectionName]) // ADDON_PAGE_SIZE
+            totalSectionPages = len(catalog[sectionName]) // pageSize
 
         page += 1
         if totalSectionPages > 1 and page < totalSectionPages:
@@ -374,17 +362,17 @@ def viewCatalogSection(params):
         xbmcplugin.addDirectoryItems(int(sys.argv[1]), tuple(_catalogSectionItems(itemsIterable)))
 
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
-    if ADDON_USE_GRID:
-        xbmc.executebuiltin('Container.SetViewMode(54)') # InfoWall.
-    else:
-        xbmc.executebuiltin('Container.SetViewMode(55)') # WideList.
+
+    useShowsLayout, layoutType = ADDON_SETTINGS['layoutShows']
+    if useShowsLayout:
+        xbmc.executebuiltin('Container.SetViewMode(' + layoutType + ')')
 
 
 def getEpisodeProviders(api, episodeID):
     '''
     Helper function to retrieve a dictionary of the un-resolved provider URLs
     and to filter out unsupported \ repeated providers from a specific video ID.
-    :returns: Dictionary of (providerName, unresolved_providerURLs) pairs.
+    :returns: Dictionary with pairs of key = str of providerName : value = list of unresolved provider URLs.
     '''
     requestHelper.setAPISource(api)
     requestHelper.delayBegin()
@@ -425,9 +413,8 @@ def getEpisodeProviders(api, episodeID):
 
         # Initialise the unresolved list of URLs for this provider if there's none yet.
         if providerName not in providers:
-            providers[providerName] = [ ]
-        # Add the URL as long as it's not empty or (on some occasions) duplicate.
-        if url and url not in providers[providerName]:
+            providers[providerName] = [url]
+        elif url and url not in providers[providerName]: # Add the URL that's not empty or (on some occasions) duplicate.
             providers[providerName].append(url)
 
     return providers
@@ -518,7 +505,7 @@ def _makeEpisodePartItems(episodeEntry, providers, showTitle, showGenres, showTh
     '''
     Similar logic to _makeEpisodeItems(), but it works on just one item with multiple streams.
     This will make one (repeated) xbmc.ListItem for the several parts, each part is a stream.
-    Then these items will be resolved in viewResolve().
+    Then these items will be resolved in viewResolve() (view set to 'RESOLVE').
     '''
     episodeName = episodeEntry['name']
     season, episode = getTitleInfo(episodeName)
@@ -541,7 +528,8 @@ def _makeEpisodePartItems(episodeEntry, providers, showTitle, showGenres, showTh
                         'thumb': showThumb,
                         'plot': showPlot,
                         'date': episodeDate,
-                        'u0': providerName + '_' + unresolvedURL # Format parameter as 'u0: providerName_providerURL'
+                        'u0': providerName + '_' + unresolvedURL,
+                        'multipart': '1'
                     }
                 ),
                 item,
@@ -556,7 +544,7 @@ def viewListEpisodes(params):
     Pages aren't necessary in here even if the thumbnails setting is on because
     for now all episodes use the same thumb and plot, inherited from the show.
     '''
-    xbmcplugin.setContent(int(sys.argv[1]), 'episodes') # Changes the skin layout.
+    xbmcplugin.setContent(int(sys.argv[1]), 'episodes')
 
     # Optional, sort episode list by labels.
     #xbmcplugin.addSortMethod(int(sys.argv[1]), xbmcplugin.SORT_METHOD_LABEL_IGNORE_THE)
@@ -587,7 +575,7 @@ def viewListEpisodes(params):
     # But the date of the parent show \ movie will only be used if the individual episode doesn't have a date itself.
     showTitle = jsonData.get('name', '')
     showGenres = params['genres'].split(',')
-    showThumb = params.get('thumb', '') # Might be empty in case ADDON_SHOW_THUMBS is off.
+    showThumb = params.get('thumb', '') # Might be empty in case ADDON_SETTINGS['showThumbs'] is off.
     showPlot = params['plot']
     showDate = params['date']
 
@@ -601,9 +589,9 @@ def viewListEpisodes(params):
         # This is probably a movie, OVA or special (considered as "1 episode shows").
         # Try to get the providers first and see if it's a multi-part video (= movie).
         episodeEntry = jsonData['episode'][0]
-        
+
         # TODO: Improve this with a specialised class for handling these tiny memory caches.
-        _PROPERTY_EPISODE_PROVIDERS = 'toonmania2.lastEpProviders'        
+        _PROPERTY_EPISODE_PROVIDERS = 'toonmania2.lastEpProviders'
         supportedProviders = None
         lastEpisodeProviders = getWindowProperty(_PROPERTY_EPISODE_PROVIDERS)
         key = episodeEntry['id'] + api
@@ -612,7 +600,7 @@ def viewListEpisodes(params):
         else:
             supportedProviders = getEpisodeProviders(api, episodeEntry['id'])
             setWindowProperty(_PROPERTY_EPISODE_PROVIDERS, {key: supportedProviders})
-        
+
         if supportedProviders:
             # Get a positive value if any provider has more than one URL, otherwise 0 if all are single URLs.
             hasMultipleParts = sum(
@@ -641,8 +629,12 @@ def viewListEpisodes(params):
             dialog = xbmcgui.Dialog()
             dialog.notification('Toonmania2', 'No providers found', xbmcgui.NOTIFICATION_INFO, 3000, False)
             xbmc.log('Toonmania2 ('+api+') | No providers for episode ID: '+episodeEntry['id'], xbmc.LOGWARNING)
-    
+
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+    useEpisodeLayout, layoutType = ADDON_SETTINGS['layoutEpisodes']
+    if useEpisodeLayout:
+        xbmc.executebuiltin('Container.SetViewMode(' + layoutType + ')')
 
 
 def viewResolve(params):
@@ -651,40 +643,23 @@ def viewResolve(params):
     '''
 
     # Helper for reading provider data from the input parameters.
-    def _readProviders(keyLetter = 'u'):
-        index = 0; key = keyLetter+'0'
+    # Each 'uN' key leads to a 'providerName_providerURL' value. Split at the first underscore.
+    def _readProviders():
+        index = 0; key = 'u0'
         while key in params:
             temp = params[key]
             uIndex = temp.find('_')
             yield temp[:uIndex], [temp[uIndex+1:]] # Yield name and single stream URL inside a list.
             index += 1
-            key = keyLetter+str(index) 
+            key = 'u'+str(index)
 
     isMultiPart = False
-    if 'p0' in params:
-        # This older way is kept because some users might have created Favourites from these items.
-        # BACKWARDS COMPATIBILITY: 0.3.1 generated p0, p1, p2 parameters with the **already resolved** URLs.
-        # This was a single episode in a show and had its providers already resolved.
-        # Each 'pN' key leads to a 'providerName_providerURL' value. Split at the first underscore.
-        validProviders = dict(_readProviders('p'))
-        isMultiPart = False
-    elif 'u0' in params:
-        # 0.3.2+, new way to do it, providers for a show with a single episode OR a multi-video-part movie
-        # were filtered based on if they're supported or not, but not yet resolved.
-        # Resolve these providers now.
-        # Each 'uN' key leads to a 'providerName_providerURL' value. Split at the first underscore.
-        def _readProviders2():
-            index = 0; key = keyLetter+'0'
-            while key in params:
-                temp = params[key]
-                uIndex = temp.find('_')
-                yield temp[:uIndex], [temp[uIndex+1:]] # Yield name and single stream URL inside a list.
-                index += 1
-                key = keyLetter+str(index)
+    if 'u0' in params:
+        # Providers for a show with a single episode OR a multi-video-part movie were filtered based
+        # on if they're supported or not, but not yet resolved. Resolve these providers now.
         validProviders = dict(resolveEpisodeProviders(dict(_readProviders())))
-        # A multipart movie causes viewListEpisodes() to filter providers but doesn't resolve them,
-        # and each part gets only single provider in this 'uN' parameter.
-        isMultiPart = (len(validProviders) == 1)
+        # Identify multipart movies that come from _makeEpisodePartItems() using a 'multipart' parameter.
+        isMultiPart = 'multipart' in params
     else:
         # This is a normal episode from a show with several episodes.
         # Get its providers and resolve them all in here.
@@ -706,10 +681,10 @@ def viewResolve(params):
             params['plot'],
             params['date']
         )
-        
+
         resolvedURL = None
-        
-        if ADDON_USE_AUTOPLAY or isMultiPart:
+
+        if ADDON_SETTINGS['autoplay'] or isMultiPart:
             from random import choice
             providerNames = tuple(providerName for providerName in validProviders.iterkeys())
             resolvedURL = validProviders[choice(providerNames)][0]
@@ -742,6 +717,71 @@ def viewResolve(params):
         next(streams) # Skip the first one, already being played.
         for index, stream in enumerate(streams):
             playlist.add(stream, index = index)'''
+
+            
+def reloadAddonSettings():
+    global ADDON_SETTINGS
+    ADDON_SETTINGS['showThumbs'] = ADDON.getSetting('show_thumbnails') == 'true'
+    ADDON_SETTINGS['pageSize'] = int(ADDON.getSetting('page_size')) # Page size = number of items per catalog section page.
+    ADDON_SETTINGS['autoplay'] = ADDON.getSetting('use_autoplay') == 'true'
+    # Create keys to a (bool, layoutType) value, eg: 'layoutCatalog': (True, '0')
+    for element in ('catalog', 'shows', 'episodes'):
+        ADDON_SETTINGS['layout' + element.capitalize()] = (
+            ADDON.getSetting('layout_use_' + element) == 'true',
+            ADDON_VIEW_MODES.get(ADDON.getSetting('layout_type_' + element), '55')
+        )
+
+
+def getTitleInfo(title):
+    '''
+    Helper function to extract season and episode values based on the title string.
+    It expects a pattern such as "[Show name] Season 2 Episode 5 [episode title]".
+    '''
+    season = episode = 0
+    titleWords = title.lower().split()
+    for index, word in enumerate(titleWords):
+        if word == 'season':
+            try:
+                season = int(titleWords[index+1])
+            except ValueError:
+                pass
+        elif word == 'episode':
+            try:
+                episode = int(titleWords[index+1])
+                if not season:
+                    season = 1 # Season may be omitted in the title.
+                break # The word 'Episode' is always put after the season and show title in the link strings.
+            except ValueError:
+                season = episode = 0 # Malformed \ typo'ed strings caused this?
+    return (season, episode)
+
+
+def setupListItem(item, showTitle, title, isPlayable, season, episode, genres, thumb = '', plot = '', date = ''):
+    '''
+    Helper function to fill in an xbmcgui.ListItem item with metadata info, supplied in the parameters.
+    'genres' might be empty or None.
+    '''
+    if isPlayable:
+        # Allows the checkmark to be placed on watched episodes, as well as some context menu options.
+        item.setProperty('IsPlayable', 'true')
+
+    if thumb:
+        item.setArt({'icon': thumb, 'thumb': thumb, 'poster': thumb})
+
+    # All items are set with 'episode' mediatype even if they aren't, as it looks better w/ the skin layout.
+    itemInfo = {
+        'mediatype': 'episode' if isPlayable else 'tvshow',
+        'tvshowtitle': showTitle,
+        'title': title,
+        'plot': plot,
+        'genre': genres if genres else '',
+        'premiered': date, # According to the docs, 'premiered' is what makes Kodi display a date.
+        'aired': date,
+        'year': date.split('-')[0] if date else ''
+    }
+    if episode:
+        itemInfo.update({'season': season, 'episode': episode})
+    item.setInfo('video', itemInfo)
 
 
 def buildURL(query):
@@ -777,5 +817,8 @@ def main():
     Main add-on routing function, it selects and shows an add-on directory.
     Uses the global VIEW_FUNCS dictionary.
     '''
+    
+    reloadAddonSettings() # Initialises ADDON_SETTINGS on Kodi < 17.6
+    
     params = {key: value[0] for key, value in parse_qs(sys.argv[2][1:]).iteritems()}
     VIEW_FUNCS[params.get('view', 'MENU')](params)

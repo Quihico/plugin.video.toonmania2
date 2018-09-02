@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import json
 from bs4 import BeautifulSoup
 from string import ascii_uppercase
 from datetime import datetime
@@ -53,14 +54,15 @@ class CatalogHelper():
 
     def __init__(self):
         '''
-        Initialises the class and adds a dict member to map API routes to catalog iterable creation functions.
-        This dict is used in _buildCatalog().
+        Initialises a dict member to map API routes to catalog iterable creation functions.
+        This dict is used in self.getCatalog().
         '''
         self.catalogFunctions = {
             '/GetUpdates/': self.latestUpdatesCatalog,
             '_executeSearch': self.executeSearchCatalog,
-            '/GetGenres/': self.genreSearchCatalog
-            # Otherwise defaults to 'genericCatalog' in self.getCatalog().
+            '_searchResults': self.searchResultsCatalog,
+            '/GetGenres/': self.genreSearchCatalog            
+            # Otherwise defaults to the 'genericCatalog' function.
         }
 
 
@@ -86,7 +88,7 @@ class CatalogHelper():
             return catalog
 
         # If these properties are empty (like when coming in from a favourites menu), or if a different
-        # catalog (website area) or a different API was stored in this property, then reload it.
+        # route (website area) or a different API was stored in this property, then reload it.
         currentAPI = getRawWindowProperty(self.PROPERTY_CATALOG_API)
         currentRoute = getRawWindowProperty(self.PROPERTY_CATALOG_ROUTE)
         if (
@@ -94,6 +96,7 @@ class CatalogHelper():
             or currentRoute != params['route']
             or 'genreName' in params # Special-case for the genre search, same api\route but 'genreName' changes.
             or 'query' in params    # Special-case for the name search, same api\route but 'query' changes.
+            or 'searchData' in params
         ):
             setRawWindowProperty(self.PROPERTY_CATALOG_API, params['api'])
             setRawWindowProperty(self.PROPERTY_CATALOG_ROUTE, params['route'])
@@ -126,13 +129,12 @@ class CatalogHelper():
     def catalogFromIterable(self, iterable):
         '''
         Splits items from an iterable into an alphabetised catalog.
-        Each item in the iterable is a tuple: (id, name, description, genres)
+        Each item in the iterable is a tuple: (id, name, description, genres, released)
         ID, name and description are str, genres is a str list.
         Description and genres list might be empty.
         '''
         catalog = self.getEmptyCatalog()
         for item in iterable:
-
             itemKey = item[1][0].upper()
             catalog[itemKey if itemKey in self.LETTERS_SET else '#'].append(item)
         return catalog
@@ -186,11 +188,11 @@ class CatalogHelper():
     def executeSearchCatalog(self, params):
         '''
         Returns a catalog from a name search, uses the standard website for searching.
-        Search query in params['query']
+        Searches query in params['query'].
         '''
         # We search with their website search, then get results.
         requestHelper.setAPISource(params['api']) # Updates the internal search URL.
-        requestHelper.setDesktopHeader()
+        requestHelper.setDesktopHeader() # Desktop user agent spoofing.
 
         requestHelper.delayBegin()
         r = requestHelper.searchGET(params['query'])
@@ -199,7 +201,11 @@ class CatalogHelper():
         if r.ok:
             soup1 = BeautifulSoup(r.text, 'html.parser')
             mainUL = soup1.find('div', {'class': 'series_list'}).ul
-
+            
+            # Early exit test. No point in loading everything if there's no search results.
+            if not mainUL.find('li'):
+                return self.getEmptyCatalog()
+                
             # A name search needs all of the items of the current API loaded, to compare IDs with.
             allData = self.getMainRoutesData(params['api'], self.allMainRouteNames(params['api']))
             idDict = {item[0]: item for item in chain.from_iterable(allData.itervalues())}
@@ -212,9 +218,9 @@ class CatalogHelper():
                         if img:
                             src = li.img['src']
                             # Assuming the thumb images of search results always end with
-                            # '.jpg' (4 characters long), the IDs of the items found can be
+                            # '.jpg' (4 characters long), the IDs of items found can be
                             # obtained from these thumb URLs.
-                            thumbID = src[src.rfind('/')+1 : -4] # Grab the 'xxx' from '..../small/xxx.jpg'.
+                            thumbID = src[src.rfind('/')+1 : -4] # Grab the 'xxxx' from '..../small/xxxx.jpg'.
                             if thumbID in idDict:
                                 yield idDict[thumbID]
 
@@ -242,6 +248,17 @@ class CatalogHelper():
             return self.getEmptyCatalog()
 
 
+    def searchResultsCatalog(self, params):
+        '''
+        Gerates a catalog from search results data in 'params'.
+        This data was created in dumpCatalogJSON().
+        '''
+        if 'searchData' in params:            
+            return self.catalogFromIterable(json.loads(params['searchData']))
+        else:
+            return self.getEmptyCatalog()
+        
+            
     def genreSearchCatalog(self, params):
         '''
         Gerates a catalog from a genre search, the genre query in params['genreName'].
@@ -315,5 +332,13 @@ class CatalogHelper():
             else ('/GetAllMovies', '/GetAllShows') # Animeplus 'All' routes.
         )
 
+        
+    def dumpCatalogJSON(self, catalog):
+        '''
+        Creates a JSON string dump from catalog items.
+        This is used in Client.py to store search results in the URL.
+        '''
+        return json.dumps(tuple(entry for section in catalog.itervalues() for entry in section))
 
+        
 catalogHelper = CatalogHelper()
