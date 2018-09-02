@@ -1,10 +1,23 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <settings>
     <category label="Interface">
-        <setting id="show_thumbnails" label="Show Thumbnails" type="bool"  default="true"/>
+        <setting id="show_thumbnails" label="Show All Thumbnails" type="bool"  default="true"/>
         <setting id="page_size" label="Items per Page" type="slider" option="int" subsetting="true" enable="eq(-1,true)" default="30" range="10,10,150"/>
-        <setting id="use_grid" label="Use Grid Layout for Shows" type="bool"  default="false"/>
+        <setting type="sep"/>
+        <setting type="lsep" label="Custom Catalog Menu Layout"/>
+        <setting id="layout_use_catalog" label="Enabled" type="bool"  default="true"/>
+        <setting id="layout_type_catalog" label="Layout Type" type="labelenum" subsetting="true" enable="eq(-1,true)" default="InfoWall" values="WideList|List|InfoWall|Wall|Poster|Banner|Shift"/>
+        <setting type="sep"/>
+        <setting type="lsep" label="Custom Show\Movie List Layout"/>
+        <setting id="layout_use_shows" label="Enabled" type="bool"  default="true"/>
+        <setting id="layout_type_shows" label="Layout Type" type="labelenum" subsetting="true" enable="eq(-1,true)" default="InfoWall" values="WideList|List|InfoWall|Wall|Poster|Banner|Shift"/>
+        <setting type="sep"/>
+        <setting type="lsep" label="Custom Episode List Layout"/>
+        <setting id="layout_use_episodes" label="Enabled" type="bool"  default="false"/>
+        <setting id="layout_type_episodes" label="Layout Type" type="labelenum" subsetting="true" enable="eq(-1,true)" default="WideList" values="WideList|Wall|InfoWall"/>
+	</category>
+    <category label="Playback">
         <setting type="lsep" label="Episodes"/>
         <setting id="use_autoplay" label="Autoplay Any Provider" type="bool"  default="true"/>
-	</category>
+    </category>
 </settings>
