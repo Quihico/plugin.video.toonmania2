@@ -4,7 +4,7 @@ from datetime import datetime
 
 from xbmc import sleep
 
-from Lib.Common import setRawWindowProperty, getRawWindowProperty
+from Lib.SimpleCache import cache
 
 
 # A requests helper class just for the Animetoon and Animeplus APIs.
@@ -25,12 +25,12 @@ class RequestHelper():
 
     # Persistent window properties holding the app versions obtained from
     # the '/GetVersion' API routes.
-    PROPERTY_ANIMETOON_VERSION = 'requesthelper.toonVersion'
-    PROPERTY_ANIMEPLUS_VERSION = 'requesthelper.plusVersion'
+    PROPERTY_ANIMETOON_VERSION = 'rhelper.prop.toonVersion'
+    PROPERTY_ANIMEPLUS_VERSION = 'rhelper.prop.plusVersion'
     
     # Stores a persistent random user-agent string, or empty if not used yet.
     # Used when name searching, it needs a desktop header for the website.
-    PROPERTY_RANDOM_USERAGENT = 'requesthelper.randomUA'
+    PROPERTY_RANDOM_USERAGENT = 'rhelper.prop.randomUA'
 
 
     def __init__(self):
@@ -76,24 +76,25 @@ class RequestHelper():
         Requests and caches the latest version from the apps.
         Probably avoids the 'Please update your app' reponse to route requests.
 
-        On Kodi < 17.6 this is evaluated at every change of directory...
+        On Kodi <= 17.6 this is called at every change of directory, so
+        we cache the app version into persistent window memory properties.
         '''
-        toonVersion = getRawWindowProperty(self.PROPERTY_ANIMETOON_VERSION)
+        toonVersion = cache.getRawProperty(self.PROPERTY_ANIMETOON_VERSION)
         if not toonVersion:
             self.setAPISource(self.API_ANIMETOON)
             self.delayBegin()
             toonVersion = self.routeGET('/GetVersion').get('version', '8.0')
             self.delayEnd()
-            setRawWindowProperty(self.PROPERTY_ANIMETOON_VERSION, toonVersion)
+            cache.setRawProperty(self.PROPERTY_ANIMETOON_VERSION, toonVersion)
         self.animetoonHeaders.update({'App-Version': toonVersion})
         
-        plusVersion = getRawWindowProperty(self.PROPERTY_ANIMEPLUS_VERSION)        
+        plusVersion = cache.getRawProperty(self.PROPERTY_ANIMEPLUS_VERSION)        
         if not plusVersion:
                 self.setAPISource(self.API_ANIMEPLUS)
                 self.delayBegin()
                 plusVersion = self.routeGET('/GetVersion').get('version', '8.0')
                 self.delayEnd()
-                setRawWindowProperty(self.PROPERTY_ANIMEPLUS_VERSION, plusVersion)                
+                cache.setRawProperty(self.PROPERTY_ANIMEPLUS_VERSION, plusVersion)                
         self.animeplusHeaders.update({'App-Version': plusVersion})
 
         
@@ -105,7 +106,14 @@ class RequestHelper():
 
 
     def GET(self, url):
-        return self.session.get(url, timeout = 10)
+        try:
+            return self.session.get(url, timeout = 10)
+        except:
+            from xbmcgui import Dialog
+            Dialog().notification('Toonmania2', 'Web request failed', xbmcgui.NOTIFICATION_INFO, 3000, True)
+            class FakeResponse:
+                ok = None             
+            return FakeResponse # Just so other parts of the add-on don't break.
 
 
     def POST(self, url, data):
@@ -120,13 +128,10 @@ class RequestHelper():
         Convenience function to GET from a route path.
         Assumes 'routeURL' starts with a forward slash.
         
-        :returns: The JSON of the response.
+        :returns: The JSON of the response or None if it failed.
         '''
         r = self.GET(self.apiURL + routeURL)
-        if r.ok:
-            return r.json()
-        else:
-            return None
+        return r.json() if r.ok else None
 
 
     def searchGET(self, query):
@@ -151,12 +156,11 @@ class RequestHelper():
     def delayEnd(self, delayOverride = 200):
         '''
         Called after a request or a code block that included a request. This actually
-        does the delay.
-        
-        :param delayOverride: Optional custom delay time in milliseconds. Default: 200ms.
+        does the delay.        
+        :param delayOverride: Custom delay time in milliseconds. Default: 200ms.
         '''
         elapsed = int((datetime.now() - self.delayStartTime).total_seconds() * 1000)
-        if elapsed < delayOverride: # Only delay if we haven't waited the full delay time, obviously.
+        if elapsed < delayOverride: # Only delay if we haven't waited the full time already.
             sleep(max(delayOverride - elapsed, 100))
 
 
@@ -166,11 +170,11 @@ class RequestHelper():
         
         :returns: A dictionary that is an incomplete desktop header, meant for updating self.session.headers.
         '''
-        randomUA = getRawWindowProperty(self.PROPERTY_RANDOM_USERAGENT)
+        randomUA = cache.getRawProperty(self.PROPERTY_RANDOM_USERAGENT)
         if not randomUA:            
             from random import choice
             randomUA = choice(self._desktopUserAgents())
-            setRawWindowProperty(self.PROPERTY_RANDOM_USERAGENT, randomUA)
+            cache.setRawProperty(self.PROPERTY_RANDOM_USERAGENT, randomUA)
         return {
             'User-Agent': randomUA,
             'Accept': 'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,image/webp,*/*;q=0.8'
