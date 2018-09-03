@@ -16,8 +16,4 @@
         <setting id="layout_use_episodes" label="Enabled" type="bool"  default="false"/>
         <setting id="layout_type_episodes" label="Layout Type" type="labelenum" subsetting="true" enable="eq(-1,true)" default="WideList" values="WideList|Wall|InfoWall"/>
 	</category>
-    <category label="Playback">
-        <setting type="lsep" label="Episodes"/>
-        <setting id="use_autoplay" label="Autoplay Any Provider" type="bool"  default="true"/>
-    </category>
 </settings>
