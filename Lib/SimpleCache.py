@@ -16,18 +16,30 @@ import xbmcaddon
 
 class SimpleCache():
 
-    CACHE_VERSION = '1' # Cache version, for future extension. Used with properties saved to disk.
+    '''
+    Cache version log:
+    1: Toonmania2 0.4.0
+    
+    2: Toonmania2 0.4.1
+        I realized '/GetNew(...)' and '/GetPopular(...)' routes just need the IDs, not the whole JSON data.
+        If something is in a '/GetPopular(...)' it will definitely be in the corresponding '/GetAll(...)'.
+        So we keep only the IDs and retrieve the full entry from the 'All' routes.
+        This change helps use less disk-space and memory.
+    '''
+    # Cache version, for future extension. Used with properties saved to disk.
+    CACHE_VERSION = '2'
 
     LIFETIME_THREE_DAYS = 72 # 3 days, in hours.
     LIFETIME_ONE_WEEK = 168 # 7 days.
-    LIFETIME_FOREVER = 0 # Never expires (see _loadFilePropertes())
+    LIFETIME_FOREVER = 0 # Never expires (see _loadFileCacheHelper())
     
     CACHE_PATH_DIR = xbmc.translatePath(xbmcaddon.Addon().getAddonInfo('profile')).decode('utf-8')
     CACHE_FILENAME = 'cache.json'
 
-    # Property name pointing to a set of property names that lead to cached data.
-    # A property is guaranteed to exist if its name is in this set.
-    PROPERTY_CACHE_NAMES = 'scache.prop.names'
+    # Property name pointing to a Python 'set()' of property names.
+    # This is used to quickly tell if a property exists or not by checking its name in the set, 
+    # rather than retrieving a property that could be a huge JSON blob just to see that it exists.
+    PROPERTY_DISK_CACHE_NAMES = 'scache.prop.names'
 
     # Property name pointing to a comma-separated list of flags.
     # This list is converted to a set when read and used for quick boolean-style testing.
@@ -37,32 +49,31 @@ class SimpleCache():
     # Flag name for testing if items were added to the memory cache so it should be saved to disk.
     # Otherwise clear.
     FLAG_CACHE_FILE_FLUSH = 'scache.flag.fileFlush'
-
-    # Flag name for testing if the Python 'cacheNames' object has data not yet in its corresponding
-    # window memory property, meaning it's necessary to flush it to that window property.
-    # It's done this way to let the add-on set several properties and then flush just once, at the end.
-    FLAG_CACHE_MEMORY_FLUSH = 'scache.flag.memoryFlush'
+    
+    # Flag name for testing if there was a problem loading the cache file for this Kodi session.
+    # Otherwise it means everything's fine.
+    # This is used to just show the file reading failure notification once.
+    FLAG_CACHE_FILE_FAILED = 'scache.flag.fileFailed'
 
 
     def __init__(self):
         # Initialised at every directory change in Kodi <= 17.6
-        self.cacheNames = None
+        self.diskCacheNames = None
         self.flags = None
         self.window = Window(getCurrentWindowId())
-        #self.window.clearProperty(self.PROPERTY_CACHE_NAMES)
 
 
     def _ensureCacheLoaded(self):
-        if not self.cacheNames:
+        if not self.diskCacheNames:
             # Try to load the cache names from memory first, then from file.
             if not self._loadMemoryCache() and not self._loadFileCache():
-                self.cacheNames = set()
+                self.diskCacheNames = set()
                 
 
     def _loadMemoryCache(self):
-        cacheNamesRaw = self.window.getProperty(self.PROPERTY_CACHE_NAMES)
-        if cacheNamesRaw:
-            self.cacheNames = self._stringToSet(cacheNamesRaw)
+        diskCacheNamesRaw = self.window.getProperty(self.PROPERTY_DISK_CACHE_NAMES)
+        if diskCacheNamesRaw:
+            self.diskCacheNames = self._stringToSet(diskCacheNamesRaw)
             return True
         else:
             return False
@@ -73,37 +84,41 @@ class SimpleCache():
         Internal.
         Helper function that loads window properties from data in the cache file.
         '''
-        self.cacheNames = set()        
+        self.diskCacheNames = set()        
         hasExpiredProps = False
         currentTime = self._getEpochHours()
 
-        allData = json.loads(fileData) # 'allData' is a JSON list of SimpleCache property entries.
+        allData = json.loads(fileData) # 'allData' is a JSON list of SimpleCache property data.
         for propEntry in allData:
             # Interpret the property based on the cache version used to write it, allowing
             # for branching like expecting a certain format depending on version etc.
-            #propVersion = propEntry['version']
-            propEpoch = propEntry['epoch']
+            
+            version = propEntry['version']
+            if version < self.CACHE_VERSION:
+                hasExpiredProps = True
+                continue # Ignore this property.
+            
+            epoch = propEntry['epoch']
             lifetime = propEntry['lifetime']
 
             # Enact property lifetime.
-            elapsedHours = currentTime - propEpoch
-            if abs(elapsedHours) <= lifetime:
+            elapsedHours = currentTime - epoch
+            if lifetime == 0 or abs(elapsedHours) <= lifetime:
                 # Load the entry as a window memory property, similar to setCacheProperty().
-                # No need to store the original cache version as it became the latest version now.
+                # We don't use setCacheProperty() or the 'epoch' would be changed to "right now".
+                # No need to store the original property cache version, as it became the latest version now.
                 propName = propEntry['propName']
-                self.cacheNames.add(propName)
-                self.window.setProperty(propName, json.dumps((propEntry['data'], True, lifetime, propEpoch)))
+                self.diskCacheNames.add(propName)
+                self.window.setProperty(propName, json.dumps((propEntry['data'], True, lifetime, epoch)))
             else:
                 # Ignore it.
                 hasExpiredProps = True                
-        self.flushCacheNames()
+        self._flushDiskCacheNames()
 
-        # Any expired properties are ignored. Request an overwrite of the cache file so they can be erased.
+        # Any expired properties were ignored. Request an overwrite of the cache file so they can be erased.
         if hasExpiredProps:
             self.setFlag(self.FLAG_CACHE_FILE_FLUSH)
-        else:
-            self.clearFlag(self.FLAG_CACHE_FILE_FLUSH)
-        self.flushFlags()
+            self.flushFlags()
 
 
     def _loadFileCache(self):
@@ -111,7 +126,7 @@ class SimpleCache():
         Tries to load the cache file if it exists, or creates a blank cache file if it there isn't one.
         '''
         fullPath = self.CACHE_PATH_DIR + self.CACHE_FILENAME
-        if xbmcvfs.exists(fullPath):
+        if not self.testFlag(self.FLAG_CACHE_FILE_FAILED) and xbmcvfs.exists(fullPath):
             file = xbmcvfs.File(fullPath)
             try:
                 # Try to load the iist of disk-saved properties.
@@ -121,10 +136,13 @@ class SimpleCache():
                 from xbmcgui import Dialog, NOTIFICATION_INFO
                 dialog = Dialog()
                 dialog.notification('Cache', 'Could not read cache file', NOTIFICATION_INFO, 3000, False)
-                self.cacheNames = set()
+                self.diskCacheNames = None
+                # Set a flag to forget about using the cache file during this Kodi session.
+                self.setFlag(self.FLAG_CACHE_FILE_FAILED)
+                self.flushFlags()
             finally:
                 file.close()
-                return self.cacheNames
+                return self.diskCacheNames
         else:
             # Initialize a blank cache file.
             xbmcvfs.mkdir(self.CACHE_PATH_DIR)
@@ -179,8 +197,6 @@ class SimpleCache():
     def setCacheProperty(self, propName, data, saveToDisk, lifetime=72):
         '''
         Creates a persistent XBMC window memory property.
-        *** The caller is expected to call flushCacheNames() *** after it has finished
-        adding one or more properties.
         :param propName: Name/Identifier the property should have, used to retrieve it later.
         :param data: Data to store in the property, needs to be JSON-serializable.
         :param saveToDisk: Boolean if this property should be saved to the JSON cache file on
@@ -193,17 +209,44 @@ class SimpleCache():
         
         if saveToDisk:
             self._ensureCacheLoaded()
-            self.cacheNames.add(propName)
+            self.diskCacheNames.add(propName)
+            self._flushDiskCacheNames()
             self.setFlag(self.FLAG_CACHE_FILE_FLUSH) # Used by saveCacheIfDirty().
             self.flushFlags()
-
-
-    def flushCacheNames(self):
+            
+            
+    def setCacheProperties(self, properties):
         '''
-        This needs to be used **every time** after setting one or more properties, to make sure the latest
-        cache name list is stored in its window memory property.
+        Convenience function to create several properties at once.
+        :param properties: An iterable, each entry in 'properties' should be a tuple, list or other
+        indexable object of this format:
+        ((str)PROPERTY_NAME, (anything)PROPERTY_DATA, (bool)SAVE_TO_DISK, (int)LIFETIME_HOURS)
+        
+        The 'PROPERTY_DATA' field should be JSON-serializable.
         '''
-        self.window.setProperty(self.PROPERTY_CACHE_NAMES, self._setToString(self.cacheNames))
+        anySaveToDisk = True
+        for pEntry in properties:
+            # Same as in setCacheProperty().
+            name, data, saveToDisk, lifetime = pEntry
+            self.window.setProperty(name, json.dumps((data, saveToDisk, lifetime, self._getEpochHours())))
+            if saveToDisk:
+                if not self.diskCacheNames:
+                    self._ensureCacheLoaded()
+                self.diskCacheNames.add(name)
+                anySaveToDisk = True
+            
+        if anySaveToDisk:
+            self._flushDiskCacheNames()
+            self.setFlag(self.FLAG_CACHE_FILE_FLUSH) # Used by saveCacheIfDirty().
+            self.flushFlags()            
+        
+
+    def _flushDiskCacheNames(self):
+        '''
+        Internal. This needs to be used **every time** after setting one or more properties, to make sure
+        the latest disk cache names set is stored in its window memory property.
+        '''
+        self.window.setProperty(self.PROPERTY_DISK_CACHE_NAMES, self._setToString(self.diskCacheNames))
 
 
     def getCacheProperty(self, propName, readFromDisk):
@@ -216,38 +259,37 @@ class SimpleCache():
         '''
         if readFromDisk:
             self._ensureCacheLoaded()            
-            if propName in self.cacheNames:
+            if propName in self.diskCacheNames:
                 propRaw = self.window.getProperty(propName)
-                return json.loads(propRaw)[0] if propRaw else None # **Important** Return index [0], data.
+                return json.loads(propRaw)[0] if propRaw else None # Return from index [0], data.
             else:
                 return None
         else:
             # Use JSON on this memory-only property.
             # If the caller wants the pure string from the window property they could use
-            # setRaw(...)\getRaw(...) instead.
+            # the setRaw(...)\getRaw(...) functions instead.
             data = self.window.getProperty(propName)
-            return json.loads(data)[0] if data else None # **Index [0], data**
-
+            return json.loads(data)[0] if data else None # Index [0], data.
+            
             
     def clearCacheProperty(self, propName, readFromDisk):
         '''
         Removes a property from memory. The next time the cache is saved this property
         won't be included and therefore forgotten.
-        *** The caller is expected to call flushCacheNames() *** after it has cleared
-        one or more properties.
         '''
         self.window.clearProperty(propName)
         if readFromDisk:
             self._ensureCacheLoaded()
-            if propName in self.cacheNames:
-                self.cacheNames.discard(propName)
+            self.diskCacheNames.discard(propName)
+            self._flushDiskCacheNames()
             
 
     def setRawProperty(self, propName, data):
         '''
         Convenience function to set a window memory property that doesn't
         need JSON serialization or saving to disk.
-        Used for unimportant properties that should persist between add-on directories.
+        Used for unimportant memory-only properties that should persist between add-on
+        directories.
         :param propName: The name of the property used to identify the data, later used
         to retrieve it.
         :param rawData: String data, stored as it is.
@@ -257,21 +299,23 @@ class SimpleCache():
 
     def getRawProperty(self, propName):
         '''
-        Retrieves a simple window property by name.
+        Retrieves a direct window property by name.
         '''
         return self.window.getProperty(propName)
 
 
     def clearRawProperty(self, propName):
         '''
-        Retrieves a simple window property by name.
+        Clears a direct window property by name.
+        To clear a property that was created with setCacheProperty()
+        use clearCacheProperty() instead.
         '''
         return self.window.clearProperty(propName)
 
 
     def saveCacheIfDirty(self):
         if self.testFlag(self.FLAG_CACHE_FILE_FLUSH): # Flag set by setCacheProperty().
-            if self.cacheNames or self._loadMemoryCache():
+            if self.diskCacheNames or self._loadMemoryCache():
                 self._saveCache()
                 self.clearFlag(self.FLAG_CACHE_FILE_FLUSH)
                 self.flushFlags()
@@ -281,7 +325,7 @@ class SimpleCache():
         '''
         Internal.
         Assumes the destination folder already exists.
-        Assumes 'self.cacheNames' has already been refreshed \ updated.
+        Assumes 'self.diskCacheNames' has already been refreshed \ updated.
         '''
         def __makeSaveData():
             '''
@@ -289,7 +333,7 @@ class SimpleCache():
             property that has 'saveToDisk=True'.
             Note that the cache version is prepended to each property entry.
             '''
-            for propName in self.cacheNames:
+            for propName in self.diskCacheNames:
                 propRaw = self.window.getProperty(propName)
                 if propRaw:
                     # Same structure as in setCacheProperty().

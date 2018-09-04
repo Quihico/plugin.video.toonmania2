@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import re
 import sys
-import json
 from itertools import chain, islice
 try:
     # Python 2.7
@@ -146,7 +145,9 @@ def _viewSearchResults(params, text):
         params.update(
             {'view': 'CATALOG_SECTION', 'section': 'ALL', 'page': '0', 'route': '_searchResults', 'searchIDs': searchIDs}
         )
-        item = xbmcgui.ListItem('[COLOR orange][B]'+text.strip().capitalize() + '[/COLOR][/B] Search Results')
+        from string import capwords
+        item = xbmcgui.ListItem('[COLOR orange][B]' + capwords(text) + '[/COLOR][/B] Search Results')
+        item.setArt({'icon': 'DefaultFolder.png', 'thumb': 'DefaultFolder.png'})
         xbmcplugin.addDirectoryItem(int(sys.argv[1]), buildURL(params), item, True)
     else:
         xbmcplugin.addDirectoryItem(int(sys.argv[1]), '', xbmcgui.ListItem('No Items Found'), False)
@@ -220,7 +221,6 @@ def viewSearchGenre(params):
         requestHelper.delayEnd()
         # Store the current API genres in a disk-persistent property with the default lifetime of 1 week.
         cache.setCacheProperty(_PROPERTY_GENRE_NAMES, genreList, saveToDisk = True, lifetime = cache.LIFETIME_ONE_WEEK)
-        cache.flushCacheNames()
 
     listItems = (
         (
@@ -285,6 +285,11 @@ def viewCatalogSection(params):
     xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
 
     catalog = catalogHelper.getCatalog(params)
+    
+    # Special-case when coming in from a search results folder (usually from a Favourite),
+    # it's a nice moment to save the cache, if necessary.
+    if 'searchIDs' in params:
+        cache.saveCacheIfDirty()        
 
     def _catalogSectionItems(iterable):
         api = params['api']
@@ -387,7 +392,7 @@ def getEpisodeStreams(api, episodeID):
                 episodeStreams.append(source['link'])
                 break
         else:
-            episodeStreams.append(part[0]['link']) # If there's no 'storage' type source for this part, use any other.
+            episodeStreams.append(part[0]['link']) # If there's no 'storage' type source, use any other source.
     return episodeStreams
 
 
