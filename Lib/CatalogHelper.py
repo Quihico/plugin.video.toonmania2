@@ -18,31 +18,6 @@ class CatalogHelper():
     # Property name for the catalog of items itself. See catalogFromIterable() for more info.
     PROPERTY_CATALOG = 'toonmania2.catalog'
 
-    # The only routes not stored in disk-persistent properties are the '/GetUpdates/' ones, which are always
-    # requested fresh.
-    '''
-    { 1. Main dictionary.
-        '/GetAllCartoon': 2. Category key. Its value is a list of tuples.
-            (
-                item, 3. Item, it's a tuple with the cartoon\movie\anime details. See makeCatalogEntry() for details.
-                item,
-                item,
-                ...
-            )
-        }
-        '/GetAllMovies': ( item, item, item, ... )
-        '/GetAllDubbed': ( item, item, item, ... )
-        '/GetNewMovies': (...)
-    }'''
-    PROPERTY_ANIMETOON_LOADED_ROUTES = 'toonmania2.animetoonRoutes' # List of the main routes already loaded.
-
-    # Dictionary w/ keys mapping to lists of items.
-    # The _LOADED_ROUTES property can be used to tell which of these routes are already loaded in this dict.
-    PROPERTY_ANIMETOON_DATA = 'toonmania2.animetoon'
-
-    PROPERTY_ANIMEPLUS_LOADED_ROUTES = 'toonmania2.animeplusRoutes' # List of the main routes already loaded.
-    PROPERTY_ANIMEPLUS_DATA = 'toonmania2.animeplus' # Same as _ANIMETOON_DATA, but for animeplus.
-
     LETTERS_SET = set(ascii_uppercase) # Used in the catalogFromIterable() function.
 
 
