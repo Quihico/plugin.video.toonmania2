@@ -197,7 +197,7 @@ def viewSearchMenu(params):
 def viewSearchGenre(params):
     '''
     Directory for a sub menu that lists the available genres to filter items by.
-    The genre list is cached memory-only to last a Kodi session. This is done because
+    The genre list is cached to disk for one week (7 days). This is done because
     if you hit "Back" Kodi will reload this directory and do a redundant web
     request...
     '''
