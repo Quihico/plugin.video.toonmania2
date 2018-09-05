@@ -125,12 +125,14 @@ class SimpleCache():
         '''
         Tries to load the cache file if it exists, or creates a blank cache file if it there isn't one.
         '''
+        if self.testFlag(self.FLAG_CACHE_FILE_FAILED):
+            return False
+            
         fullPath = self.CACHE_PATH_DIR + self.CACHE_FILENAME
-        if not self.testFlag(self.FLAG_CACHE_FILE_FAILED) and xbmcvfs.exists(fullPath):
+        if xbmcvfs.exists(fullPath):
             file = xbmcvfs.File(fullPath)
             try:
-                # Try to load the iist of disk-saved properties.
-                self._loadFileCacheHelper(file.read())
+                self._loadFileCacheHelper(file.read()) # Try to load the iist of disk-saved properties.
             except:
                 # Error. Notification with no sound.
                 from xbmcgui import Dialog, NOTIFICATION_INFO
@@ -146,9 +148,7 @@ class SimpleCache():
         else:
             # Initialize a blank cache file.
             xbmcvfs.mkdir(self.CACHE_PATH_DIR)
-            file = xbmcvfs.File(fullPath, 'w')
-            file.write('[]')
-            file.close()
+            self._writeBlankCacheFile(fullPath)
             return False
 
 
@@ -203,16 +203,17 @@ class SimpleCache():
         disk to be loaded on later sessions. Best used for big collections of web-requested data.
         :param lifetime: When saving to disk, 'lifetime' specifies how many hours since its
         creation that the property should exist on disk, before being erased. Defaults to 72
-        hours = 3 days. Setting ZERO will make it last forever.
+        hours = 3 days. Setting it as '0' (zero) will make it last forever.
         '''
-        self.window.setProperty(propName, json.dumps((data, saveToDisk, lifetime, self._getEpochHours())))
-        
         if saveToDisk:
+            self.window.setProperty(propName, json.dumps((data, saveToDisk, lifetime, self._getEpochHours())))
             self._ensureCacheLoaded()
             self.diskCacheNames.add(propName)
             self._flushDiskCacheNames()
             self.setFlag(self.FLAG_CACHE_FILE_FLUSH) # Used by saveCacheIfDirty().
             self.flushFlags()
+        else:
+            self.window.setProperty(propName, json.dumps( (data,) )) # Other fields (lifetime, epoch etc.) are not needed.
             
             
     def setCacheProperties(self, properties):
@@ -251,7 +252,8 @@ class SimpleCache():
 
     def getCacheProperty(self, propName, readFromDisk):
         '''
-        Tries to return the data from a window memory property.
+        Tries to return the JSON--loaded data from a window memory property.
+        For the pure property string use the setRaw(...)\getRaw(...) functions instead.
         :param propName: Name of the property to retrieve.
         :param readFromDisk: Used with properties that might be saved on disk (it tries to load
         from memory first though).
@@ -259,17 +261,13 @@ class SimpleCache():
         '''
         if readFromDisk:
             self._ensureCacheLoaded()            
-            if propName in self.diskCacheNames:
-                propRaw = self.window.getProperty(propName)
-                return json.loads(propRaw)[0] if propRaw else None # Return from index [0], data.
-            else:
+            if propName not in self.diskCacheNames:
                 return None
-        else:
-            # Use JSON on this memory-only property.
-            # If the caller wants the pure string from the window property they could use
-            # the setRaw(...)\getRaw(...) functions instead.
-            data = self.window.getProperty(propName)
-            return json.loads(data)[0] if data else None # Index [0], data.
+
+        # Return the first field of the property JSON (the data).
+        # This works the same for memory-only properties.
+        data = self.window.getProperty(propName)
+        return json.loads(data)[0] if data else None
             
             
     def clearCacheProperty(self, propName, readFromDisk):
@@ -282,6 +280,8 @@ class SimpleCache():
             self._ensureCacheLoaded()
             self.diskCacheNames.discard(propName)
             self._flushDiskCacheNames()
+            self.setFlag(self.FLAG_CACHE_FILE_FLUSH)
+            self.flushFlags()
             
 
     def setRawProperty(self, propName, data):
@@ -314,7 +314,7 @@ class SimpleCache():
 
 
     def saveCacheIfDirty(self):
-        if self.testFlag(self.FLAG_CACHE_FILE_FLUSH): # Flag set by setCacheProperty().
+        if self.testFlag(self.FLAG_CACHE_FILE_FLUSH) and not self.testFlag(self.FLAG_CACHE_FILE_FAILED):
             if self.diskCacheNames or self._loadMemoryCache():
                 self._saveCache()
                 self.clearFlag(self.FLAG_CACHE_FILE_FLUSH)
@@ -351,6 +351,21 @@ class SimpleCache():
         file.write(json.dumps(tuple(__makeSaveData())))
         file.close()
 
+        
+    def _writeBlankCacheFile(self, fullPath):
+        '''Assumes the directory to the file exists.'''
+        file = xbmcvfs.File(fullPath, 'w')
+        file.write('[]')
+        file.close()
+        
+        
+    def clearCacheFile(self):
+        fullPath = self.CACHE_PATH_DIR + self.CACHE_FILENAME
+        if xbmcvfs.exists(fullPath):
+            self._writeBlankCacheFile(fullPath)
+            return True
+        return False
+        
 
     def _setToString(self, setObject):
         return (','.join(element for element in setObject))

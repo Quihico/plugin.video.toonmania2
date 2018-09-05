@@ -73,6 +73,16 @@ def viewSettings(params):
     reloadSettings() # So right after it is a good time to update the globals.
 
 
+def viewClearCache(params):
+    if cache.clearCacheFile():
+        dialog = xbmcgui.Dialog()
+        dialog.notification('Toonmania2', 'Cache file cleared', xbmcgui.NOTIFICATION_INFO, 4000, True)
+
+    # Close the settings dialog when it was opened from within this add-on.        
+    if 'toonmania2' in xbmc.getInfoLabel('Container.PluginName'):
+        xbmc.executebuiltin('Dialog.Close(all)')
+    
+    
 def viewAnimetoonMenu(params):
     '''
     Directory for the Animetoon website.
@@ -197,7 +207,7 @@ def viewSearchMenu(params):
 def viewSearchGenre(params):
     '''
     Directory for a sub menu that lists the available genres to filter items by.
-    The genre list is cached to disk for one week (7 days). This is done because
+    The genre list is cached memory-only to last a Kodi session. This is done because
     if you hit "Back" Kodi will reload this directory and do a redundant web
     request...
     '''
@@ -381,19 +391,22 @@ def getEpisodeStreams(api, episodeID):
     jsonData = requestHelper.routeGET('/GetVideos/' + episodeID + '?direct')
     requestHelper.delayEnd(1000)
 
-    if not jsonData:
-        return None
-
-    episodeStreams = [ ]
-
-    for part in jsonData:
-        for source in part:
-            if source['source'] == 'storage':
-                episodeStreams.append(source['link'])
-                break
-        else:
-            episodeStreams.append(part[0]['link']) # If there's no 'storage' type source, use any other source.
-    return episodeStreams
+    if jsonData:
+        episodeStreams = [ ]
+        for part in jsonData:
+            for source in part:
+                if source['source'] == 'storage':
+                    episodeStreams.append(source['link'])
+                    break
+            else:
+                episodeStreams.append(part[0]['link']) # If there's no 'storage' type source, use any other source.
+        return episodeStreams
+    else:
+        # Return any list of streams, no matter the provider.
+        # They usually resolve to the same host, "gateway.play44.net".
+        from Lib.Providers import resolveEpisodeProviders
+        resolvedProviders = resolveEpisodeProviders(api, episodeID)
+        return resolvedProviders[0] if resolvedProviders else None
 
 
 def _makeEpisodeItems(api, episodes, showTitle, showGenres, showThumb, showPlot, showDate):
@@ -569,8 +582,12 @@ def viewResolve(params):
     cache.saveCacheIfDirty() # Save the cache, only if necessary, before watching a video.
 
     # If the stream is already included in the parameters, no need to retrieve it in here again.
-    stream = params['stream'] if 'stream' in params else getEpisodeStreams(params['api'], params['episodeID'])[0]
-
+    if 'stream' in params:
+        stream = params['stream']
+    else:
+         streams = getEpisodeStreams(params['api'], params['episodeID'])
+         stream = streams[0] if streams else None
+         
     if stream:
         item = xbmcgui.ListItem(params['name'])
         setupListItem(
@@ -666,7 +683,7 @@ def buildURL(query):
     :returns: A formatted URL string.
     '''
     return (sys.argv[0] + '?' + urlencode({k: v.encode('utf-8') if isinstance(v, unicode)
-                                           else unicode(v, errors='replace').encode('utf-8')
+                                           else unicode(v, errors='ignore').encode('utf-8')
                                            for k, v in query.iteritems()}))
 
 
@@ -682,6 +699,7 @@ VIEW_FUNCS = {
     'SEARCH_MENU': viewSearchMenu,
     'SEARCH_GENRE': viewSearchGenre,
 
+    'CLEAR_CACHE': viewClearCache,
     'LIST_EPISODES': viewListEpisodes,
     'RESOLVE': viewResolve
 }

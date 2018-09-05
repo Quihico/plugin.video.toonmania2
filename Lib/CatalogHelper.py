@@ -110,8 +110,8 @@ class CatalogHelper():
             itemKey = item[1][0].upper()
             catalog[itemKey if itemKey in self.LETTERS_SET else '#'].append(item)
         return catalog
-        
-        
+
+
     def genericCatalog(self, params):
         '''
         Returns a catalog for either the '/GetNew(...)' or '/GetPopular(...)' routes.
@@ -120,6 +120,9 @@ class CatalogHelper():
         '''
         api = params['api']
         route = params['route']
+
+        # Get the corresponding '/GetAll(...)' route with the data that will be needed.
+        allRoute = route.replace('New', 'All') if '/GetNew' in route else route.replace('Popular', 'All')
 
         genericIDs = cache.getCacheProperty(api+route, readFromDisk = False)
         if not genericIDs:
@@ -130,10 +133,10 @@ class CatalogHelper():
                 genericIDs = tuple(entry['id'] for entry in jsonData)
                 cache.setCacheProperty(api+route, genericIDs, saveToDisk = False)
             requestHelper.delayEnd(500)
-            
+
         if genericIDs:
             # Load all the main routes of the API (they are disk-cached), to compare IDs with.
-            allData = self._getMainRoutesData(api)
+            allData = self._getMainRoutesData(api, allRoute)
             idDict = {item[0]: item for item in chain.from_iterable(allData.itervalues())}
             return self.catalogFromIterable(idDict[entryID] for entryID in genericIDs if entryID in idDict)
         else:
@@ -155,7 +158,7 @@ class CatalogHelper():
             if jsonData:
                 cache.setCacheProperty(api+route, jsonData, saveToDisk = True) # Default to 3 days cache lifetime.
             requestHelper.delayEnd(500)
-            
+
         if jsonData:
             return self.catalogFromIterable(self.makeCatalogEntry(entry) for entry in jsonData)
         else:
@@ -225,21 +228,23 @@ class CatalogHelper():
         )
 
 
-    def _getMainRoutesData(self, api):
+    def _getMainRoutesData(self, api, customRoute=None):
         '''
         Loads all the main routes from one of the APIs to be used in the "filtering" catalog functions, like
-        the latestUpdatesCatalog, genreSearchCatalog etc. that need all items loaded at once.
+        the latestUpdatesCatalog, genreSearchCatalog etc. that need all the items loaded at once.
         :returns: A dict of the '/GetAll(...)' routes of the API, each route key holds a list of catalog entries.
         '''
         requestHelper.setAPISource(api)
-        if api == requestHelper.API_ANIMETOON:
-            routeAlls = ('/GetAllCartoon', '/GetAllMovies', '/GetAllDubbed') # Animetoon 'All' routes.
+        if customRoute:
+            routeAlls = (customRoute,)
         else:
-            routeAlls = ('/GetAllMovies', '/GetAllShows') # Animeplus 'All' routes.
+            if api == requestHelper.API_ANIMETOON:
+                routeAlls = ('/GetAllCartoon', '/GetAllMovies', '/GetAllDubbed') # Animetoon 'All' routes.
+            else:
+                routeAlls = ('/GetAllMovies', '/GetAllShows') # Animeplus 'All' routes.
 
         routesData = { }
-        newProperties = [ ]        
-        isNewProperty = False
+        newProperties = [ ]
         for route in routeAlls:
             jsonData = cache.getCacheProperty(api+route, readFromDisk = True) # Try to get the cached property first.
             if not jsonData:
@@ -247,20 +252,19 @@ class CatalogHelper():
                 jsonData = requestHelper.routeGET(route)
                 if jsonData:
                     newProperties.append((api+route, jsonData, True, cache.LIFETIME_THREE_DAYS))
-                    isNewProperty = True
-                requestHelper.delayEnd(1000) # Always delay between requests so we don't abuse the source.            
+                requestHelper.delayEnd(1000) # Always delay between requests so we don't abuse the source.
             routesData[route] = tuple(self.makeCatalogEntry(entry) for entry in jsonData)
-        
+
         if newProperties:
             cache.setCacheProperties(newProperties)
 
         return routesData
-        
-        
+
+
     def nameSearchEntries(self, api, text):
         '''
         This name search is done with their own website search.
-        :returns: A list of entry IDs found in the search. 
+        :returns: A list of entry IDs found in the search.
         '''
         requestHelper.setAPISource(api) # Updates the internal search URL.
         requestHelper.setDesktopHeader() # Desktop user agent spoofing.
@@ -270,14 +274,14 @@ class CatalogHelper():
         requestHelper.delayEnd(1500)
         if not r.ok:
             return ( )
-            
+
         soup1 = BeautifulSoup(r.text, 'html.parser')
         mainUL = soup1.find('div', {'class': 'series_list'}).ul
 
         # Early exit test. No point in going further if there's no search results.
         if not mainUL.find('li'):
             return ( )
-        allULs = [mainUL]        
+        allULs = [mainUL]
 
         # A name search needs all of the items of the current API loaded, to compare IDs with.
         # Make a dictionary to map entry IDs to the entries themselves.
