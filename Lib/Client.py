@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import re
 import sys
+from math import ceil
 from itertools import chain, islice
 try:
     # Python 2.7
@@ -344,11 +345,11 @@ def viewCatalogSection(params):
             # Flatten all sections into an iterable, which is then islice'd to get the current directory page.
             flatSections = chain.from_iterable(catalog[sectionKey] for sectionKey in sorted(catalog.iterkeys()))
             itemsIterable = (entry for entry in islice(flatSections, start, stop))
-            totalSectionPages = sum(len(section) for section in catalog.itervalues()) // pageSize
+            totalSectionPages = int(ceil(sum(len(section) for section in catalog.itervalues()) / float(pageSize)))
         else:
             # Do an islice of a specific section.
             itemsIterable = (entry for entry in islice(catalog[sectionKey], start, stop))
-            totalSectionPages = len(catalog[sectionKey]) // pageSize
+            totalSectionPages = int(ceil(len(catalog[sectionKey]) / float(pageSize))) # The 'float' is for Python 2.
 
         page += 1
         if totalSectionPages > 1 and page < totalSectionPages:
