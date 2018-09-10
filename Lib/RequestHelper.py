@@ -4,7 +4,7 @@ from datetime import datetime
 
 from xbmc import sleep
 
-from Lib.SimpleCache import cache
+from Lib.SimpleCache import simpleCache as cache
 
 
 # A requests helper class just for the Animetoon and Animeplus APIs.

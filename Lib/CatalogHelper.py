@@ -5,7 +5,7 @@ from string import ascii_uppercase
 from datetime import datetime
 from itertools import chain
 
-from Lib.SimpleCache import cache
+from Lib.SimpleCache import simpleCache as cache
 from Lib.RequestHelper import requestHelper
 
 
@@ -137,7 +137,7 @@ class CatalogHelper():
         if genericIDs:
             # Load all the main routes of the API (they are disk-cached), to compare IDs with.
             allData = self._getMainRoutesData(api, allRoute)
-            idDict = {item[0]: item for item in chain.from_iterable(allData.itervalues())}
+            idDict = {item[0]: item for item in chain.from_iterable(allData)}
             return self.catalogFromIterable(idDict[entryID] for entryID in genericIDs if entryID in idDict)
         else:
             return self.getEmptyCatalog()
@@ -150,13 +150,15 @@ class CatalogHelper():
         api = params['api']
         route = params['route']
 
-        jsonData = cache.getCacheProperty(api+route, readFromDisk = True)
+        propName = self._diskFriendlyPropName(api+route)
+        
+        jsonData = cache.getCacheProperty(propName, readFromDisk = True)
         if not jsonData:
             requestHelper.setAPISource(api)
             requestHelper.delayBegin()
             jsonData = requestHelper.routeGET(route)
             if jsonData:
-                cache.setCacheProperty(api+route, jsonData, saveToDisk = True) # Default to 3 days cache lifetime.
+                cache.setCacheProperty(propName, jsonData, saveToDisk = True) # Defaults to 3 days cache lifetime.
             requestHelper.delayEnd(500)
 
         if jsonData:
@@ -194,7 +196,7 @@ class CatalogHelper():
             # Latest Updates needs all items of the current API loaded, to compare IDs with.
             # Make a dictionary to map item IDs to the items themselves.
             allData = self._getMainRoutesData(api)
-            idDict = {item[0]: item for item in chain.from_iterable(allData.itervalues())}
+            idDict = {item[0]: item for item in chain.from_iterable(allData)}
             # Find the entries based on their IDs from the latest updates list.
             return self.catalogFromIterable(idDict[entryID] for entryID in latestIDs if entryID in idDict)
         else:
@@ -209,7 +211,7 @@ class CatalogHelper():
         if searchIDs:
             # A search result filtering needs all of the items of the searched API loaded to compare IDs with.
             allData = self._getMainRoutesData(params['api'])
-            idDict = {entry[0]: entry for entry in chain.from_iterable(allData.itervalues())}
+            idDict = {entry[0]: entry for entry in chain.from_iterable(allData)}
             return self.catalogFromIterable(idDict[resultID] for resultID in searchIDs if resultID in idDict)
         else:
             return self.getEmptyCatalog()
@@ -224,41 +226,8 @@ class CatalogHelper():
         allData = self._getMainRoutesData(params['api'])
         # Inclusion test for 'genreName'.
         return self.catalogFromIterable(
-            entry for entry in chain.from_iterable(allData.itervalues()) if genreName in entry[3]
+            entry for entry in chain.from_iterable(allData) if genreName in entry[3]
         )
-
-
-    def _getMainRoutesData(self, api, customRoute=None):
-        '''
-        Loads all the main routes from one of the APIs to be used in the "filtering" catalog functions, like
-        the latestUpdatesCatalog, genreSearchCatalog etc. that need all the items loaded at once.
-        :returns: A dict of the '/GetAll(...)' routes of the API, each route key holds a list of catalog entries.
-        '''
-        requestHelper.setAPISource(api)
-        if customRoute:
-            routeAlls = (customRoute,)
-        else:
-            if api == requestHelper.API_ANIMETOON:
-                routeAlls = ('/GetAllCartoon', '/GetAllMovies', '/GetAllDubbed') # Animetoon 'All' routes.
-            else:
-                routeAlls = ('/GetAllMovies', '/GetAllShows') # Animeplus 'All' routes.
-
-        routesData = { }
-        newProperties = [ ]
-        for route in routeAlls:
-            jsonData = cache.getCacheProperty(api+route, readFromDisk = True) # Try to get the cached property first.
-            if not jsonData:
-                requestHelper.delayBegin()
-                jsonData = requestHelper.routeGET(route)
-                if jsonData:
-                    newProperties.append((api+route, jsonData, True, cache.LIFETIME_THREE_DAYS))
-                requestHelper.delayEnd(1000) # Always delay between requests so we don't abuse the source.
-            routesData[route] = tuple(self.makeCatalogEntry(entry) for entry in jsonData)
-
-        if newProperties:
-            cache.setCacheProperties(newProperties)
-
-        return routesData
 
 
     def nameSearchEntries(self, api, text):
@@ -286,7 +255,7 @@ class CatalogHelper():
         # A name search needs all of the items of the current API loaded, to compare IDs with.
         # Make a dictionary to map entry IDs to the entries themselves.
         allData = self._getMainRoutesData(api)
-        idDict = {entry[0]: entry for entry in chain.from_iterable(allData.itervalues())}
+        idDict = {entry[0]: entry for entry in chain.from_iterable(allData)}
 
         # Helper function to find the entry with the same ID as the one from the search results.
         def _nameSearchEntriesHelper(mainULs):
@@ -309,7 +278,7 @@ class CatalogHelper():
             for button in paginationDIV.find_all('button'):
                 nextURL = button.get('href', None)
                 if nextURL:
-
+                
                     requestHelper.delayBegin()
                     r2 = requestHelper.GET(nextURL)
                     if r2.ok:
@@ -320,5 +289,51 @@ class CatalogHelper():
 
         return (entryID for entryID in _nameSearchEntriesHelper(allULs))
 
+        
+    def _getMainRoutesData(self, api, customRoute=None):
+        '''
+        Loads all the main routes from one of the APIs to be used in the "filtering" catalog functions, like
+        the latestUpdatesCatalog, genreSearchCatalog etc. that need all the items loaded at once.
+        :returns: A dict of the '/GetAll(...)' routes of the API, each route key holds a list of catalog entries.
+        '''
+        requestHelper.setAPISource(api)
+        if customRoute:
+            routeAlls = (customRoute,)
+        else:
+            if api == requestHelper.API_ANIMETOON:
+                routeAlls = ('/GetAllCartoon', '/GetAllMovies', '/GetAllDubbed') # Animetoon 'All' routes.
+            else:
+                routeAlls = ('/GetAllMovies', '/GetAllShows') # Animeplus 'All' routes.
+
+        routesData = [ ]
+        newProperties = [ ]
+        for route in routeAlls:
+            # Try to get the cached property first.
+            jsonData = cache.getCacheProperty(
+                self._diskFriendlyPropName(api+route), readFromDisk = True
+            ) 
+            if not jsonData:
+                requestHelper.delayBegin()
+                jsonData = requestHelper.routeGET(route)
+                if jsonData:
+                    newProperties.append(
+                        (self._diskFriendlyPropName(api+route), jsonData, cache.LIFETIME_THREE_DAYS)
+                    )
+                requestHelper.delayEnd(1000) # Always delay between requests so we don't abuse the source.
+            routesData.append(tuple(self.makeCatalogEntry(entry) for entry in jsonData))
+
+        if newProperties:
+            cache.setCacheProperties(newProperties, saveToDisk=True)
+
+        return routesData        
+        
+        
+    def _diskFriendlyPropName(self, propName):
+        '''
+        Clean the property name to be harddisk-friendly, as the cache file will have the same
+        name of the property plus the '.json' extension.
+        '''
+        return propName.replace('/', '_')
+        
 
 catalogHelper = CatalogHelper()

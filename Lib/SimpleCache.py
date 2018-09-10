@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+from os import sep as osSeparator
 from time import time
 
 import xbmc
@@ -19,270 +20,189 @@ class SimpleCache():
     '''
     Cache version log:
     1: Toonmania2 0.4.0
-    
+
     2: Toonmania2 0.4.1
         I realized '/GetNew(...)' and '/GetPopular(...)' routes just need the IDs, not the whole JSON data.
         If something is in a '/GetPopular(...)' it will definitely be in the corresponding '/GetAll(...)'.
         So we keep only the IDs and retrieve the full entry from the 'All' routes.
         This change helps use less disk-space and memory.
+
+    3: Toonmania2 0.4.2
+        In this cache version we're using separate cache files for each route the user visited.
+        This way uses we less memory because we only need to load the routes the user wants to
+        go to, not one huge file that has everything, with what the user wants or doesn't want.
     '''
     # Cache version, for future extension. Used with properties saved to disk.
-    CACHE_VERSION = '2'
+    CACHE_VERSION = 3
 
     LIFETIME_THREE_DAYS = 72 # 3 days, in hours.
+    LIFETIME_FIVE_DAYS = 120 # 5 days.
     LIFETIME_ONE_WEEK = 168 # 7 days.
-    LIFETIME_FOREVER = 0 # Never expires (see _loadFileCacheHelper())
-    
-    CACHE_PATH_DIR = xbmc.translatePath(xbmcaddon.Addon().getAddonInfo('profile')).decode('utf-8')
-    CACHE_FILENAME = 'cache.json'
+    LIFETIME_FOREVER = 0 # Never expires.
+
+    # Path to .../kodi/userdata/addons_data/plugin.video.toonmania2/cache/ -> where the JSON cache files will be.
+    CACHE_PATH_DIR = xbmc.translatePath(xbmcaddon.Addon().getAddonInfo('profile')).decode('utf-8') + 'cache' + osSeparator
 
     # Property name pointing to a Python 'set()' of property names.
-    # This is used to quickly tell if a property exists or not by checking its name in the set, 
+    # This is used to quickly tell if a property exists or not by checking its name in the set,
     # rather than retrieving a property that could be a huge JSON blob just to see that it exists.
-    PROPERTY_DISK_CACHE_NAMES = 'scache.prop.names'
+    PROPERTY_DISK_NAMES_SET = 'scache.prop.names'
 
-    # Property name pointing to a comma-separated list of flags.
-    # This list is converted to a set when read and used for quick boolean-style testing.
-    # Testing a flag means seeing if it's present in the set or not.
-    PROPERTY_FLAGS = 'scache.prop.memory'
 
-    # Flag name for testing if items were added to the memory cache so it should be saved to disk.
-    # Otherwise clear.
-    FLAG_CACHE_FILE_FLUSH = 'scache.flag.fileFlush'
-    
-    # Flag name for testing if there was a problem loading the cache file for this Kodi session.
-    # Otherwise it means everything's fine.
-    # This is used to just show the file reading failure notification once.
-    FLAG_CACHE_FILE_FAILED = 'scache.flag.fileFailed'
+    # Property name pointing to a comma-separated list of dirty disk-enabled properties that need saving.
+    # This list is converted to a set when read and used for quick testing.
+    PROPERTY_DIRTY_NAMES_SET = 'scache.prop.dirty'
 
 
     def __init__(self):
-        # Initialised at every directory change in Kodi <= 17.6
-        self.diskCacheNames = None
-        self.flags = None
+        '''
+        Initialised at every directory change in Kodi <= 17.6.
+        '''
         self.window = Window(getCurrentWindowId())
-
-
-    def _ensureCacheLoaded(self):
-        if not self.diskCacheNames:
-            # Try to load the cache names from memory first, then from file.
-            if not self._loadMemoryCache() and not self._loadFileCache():
-                self.diskCacheNames = set()
-                
-
-    def _loadMemoryCache(self):
-        diskCacheNamesRaw = self.window.getProperty(self.PROPERTY_DISK_CACHE_NAMES)
-        if diskCacheNamesRaw:
-            self.diskCacheNames = self._stringToSet(diskCacheNamesRaw)
-            return True
-        else:
-            return False
-
-
-    def _loadFileCacheHelper(self, fileData):
-        '''
-        Internal.
-        Helper function that loads window properties from data in the cache file.
-        '''
-        self.diskCacheNames = set()        
-        hasExpiredProps = False
-        currentTime = self._getEpochHours()
-
-        allData = json.loads(fileData) # 'allData' is a JSON list of SimpleCache property data.
-        for propEntry in allData:
-            # Interpret the property based on the cache version used to write it, allowing
-            # for branching like expecting a certain format depending on version etc.
-            
-            version = propEntry['version']
-            if version < self.CACHE_VERSION:
-                hasExpiredProps = True
-                continue # Ignore this property.
-            
-            epoch = propEntry['epoch']
-            lifetime = propEntry['lifetime']
-
-            # Enact property lifetime.
-            elapsedHours = currentTime - epoch
-            if lifetime == 0 or abs(elapsedHours) <= lifetime:
-                # Load the entry as a window memory property, similar to setCacheProperty().
-                # We don't use setCacheProperty() or the 'epoch' would be changed to "right now".
-                # No need to store the original property cache version, as it became the latest version now.
-                propName = propEntry['propName']
-                self.diskCacheNames.add(propName)
-                self.window.setProperty(propName, json.dumps((propEntry['data'], True, lifetime, epoch)))
-            else:
-                # Ignore it.
-                hasExpiredProps = True                
-        self._flushDiskCacheNames()
-
-        # Any expired properties were ignored. Request an overwrite of the cache file so they can be erased.
-        if hasExpiredProps:
-            self.setFlag(self.FLAG_CACHE_FILE_FLUSH)
-            self.flushFlags()
-
-
-    def _loadFileCache(self):
-        '''
-        Tries to load the cache file if it exists, or creates a blank cache file if it there isn't one.
-        '''
-        if self.testFlag(self.FLAG_CACHE_FILE_FAILED):
-            return False
-            
-        fullPath = self.CACHE_PATH_DIR + self.CACHE_FILENAME
-        if xbmcvfs.exists(fullPath):
-            file = xbmcvfs.File(fullPath)
-            try:
-                self._loadFileCacheHelper(file.read()) # Try to load the iist of disk-saved properties.
-            except:
-                # Error. Notification with no sound.
-                from xbmcgui import Dialog, NOTIFICATION_INFO
-                dialog = Dialog()
-                dialog.notification('Cache', 'Could not read cache file', NOTIFICATION_INFO, 3000, False)
-                self.diskCacheNames = None
-                # Set a flag to forget about using the cache file during this Kodi session.
-                self.setFlag(self.FLAG_CACHE_FILE_FAILED)
-                self.flushFlags()
-            finally:
-                file.close()
-                return self.diskCacheNames
-        else:
-            # Initialize a blank cache file.
-            xbmcvfs.mkdir(self.CACHE_PATH_DIR)
-            self._writeBlankCacheFile(fullPath)
-            return False
-
-
-    def testFlag(self, flag):
-        '''
-        Returns True if a persistent flag is set in memory, else False.
-        '''
-        self._ensureFlags()
-        return flag in self.flags
-
-
-    def setFlag(self, flag):
-        '''
-        Adds a flag to memory.
-        Do not use comma characters in the flag name, they're used internally for separation.
-        '''
-        self._ensureFlags()
-        self.flags.add(flag)
-
-
-    def clearFlag(self, flag):
-        '''
-        Removes a flag from memory.
-        '''
-        self._ensureFlags()
-        self.flags.discard(flag)
-
-
-    def flushFlags(self):
-        '''
-        This needs to be used **every time** after setting one or more flags.
-        This stores all flags from the 'self.flags' Python object into a XBMC window memory property.
-        '''
-        self.window.setProperty(self.PROPERTY_FLAGS, self._setToString(self.flags))
-
-
-    def _ensureFlags(self):
-        '''
-        Internal.
-        Loads a set() into the 'self.flags' Python object from the data in the XBMC window memory property.
-        '''
-        if not self.flags:
-            self.flags = self._stringToSet(self.window.getProperty(self.PROPERTY_FLAGS))
+        self.diskNamesSet = None
+        self.dirtyNamesSet = None
 
 
     def setCacheProperty(self, propName, data, saveToDisk, lifetime=72):
         '''
         Creates a persistent XBMC window memory property.
         :param propName: Name/Identifier the property should have, used to retrieve it later.
+        Needs to be file-system friendly, and cannot have commas in the name.
         :param data: Data to store in the property, needs to be JSON-serializable.
-        :param saveToDisk: Boolean if this property should be saved to the JSON cache file on
+        :param saveToDisk: Boolean if this property should be saved to a JSON cache file on
         disk to be loaded on later sessions. Best used for big collections of web-requested data.
         :param lifetime: When saving to disk, 'lifetime' specifies how many hours since its
-        creation that the property should exist on disk, before being erased. Defaults to 72
-        hours = 3 days. Setting it as '0' (zero) will make it last forever.
+        creation that the property should have on disk, before being erased. Defaults to 72
+        hours (3 days). Setting it as '0' (zero) will make it last forever.
         '''
         if saveToDisk:
-            self.window.setProperty(propName, json.dumps((data, saveToDisk, lifetime, self._getEpochHours())))
-            self._ensureCacheLoaded()
-            self.diskCacheNames.add(propName)
-            self._flushDiskCacheNames()
-            self.setFlag(self.FLAG_CACHE_FILE_FLUSH) # Used by saveCacheIfDirty().
-            self.flushFlags()
+            # Create the window memory property.
+            self._storeCacheProperty(propName, data, lifetime, self._getEpochHours())
+
+            # Store the name of this disk-enabled property in a set to quickly tell
+            # that it's already in memory and doesn't need to be loaded from disk.
+            self._ensureDiskNamesSet()
+            self.diskNamesSet.add(propName)
+            self._storeMemorySet(self.PROPERTY_DISK_NAMES_SET, self.diskNamesSet)
+
+            # Add the name of this new property to a set used by saveCacheIfDirty()
+            # to tell which disk-enabled properties need saving to disk.
+            self._ensureDirtyNamesSet()
+            self.dirtyNamesSet.add(propName)
+            self._storeMemorySet(self.PROPERTY_DIRTY_NAMES_SET, self.dirtyNamesSet)
         else:
-            self.window.setProperty(propName, json.dumps( (data,) )) # Other fields (lifetime, epoch etc.) are not needed.
-            
-            
-    def setCacheProperties(self, properties):
+            # A memory-only property. Other fields (lifetime, epoch etc.) are not needed.
+            self.window.setProperty(propName, json.dumps(data))
+
+
+    def setCacheProperties(self, properties, saveToDisk):
         '''
         Convenience function to create several properties at once.
-        :param properties: An iterable, each entry in 'properties' should be a tuple, list or other
-        indexable object of this format:
-        ((str)PROPERTY_NAME, (anything)PROPERTY_DATA, (bool)SAVE_TO_DISK, (int)LIFETIME_HOURS)
-        
-        The 'PROPERTY_DATA' field should be JSON-serializable.
-        '''
-        anySaveToDisk = True
-        for pEntry in properties:
-            # Same as in setCacheProperty().
-            name, data, saveToDisk, lifetime = pEntry
-            self.window.setProperty(name, json.dumps((data, saveToDisk, lifetime, self._getEpochHours())))
-            if saveToDisk:
-                if not self.diskCacheNames:
-                    self._ensureCacheLoaded()
-                self.diskCacheNames.add(name)
-                anySaveToDisk = True
-            
-        if anySaveToDisk:
-            self._flushDiskCacheNames()
-            self.setFlag(self.FLAG_CACHE_FILE_FLUSH) # Used by saveCacheIfDirty().
-            self.flushFlags()            
-        
+        :param properties: For disk-enabled properties (saveToDisk=True), it's an iterable where
+        each entry should be a tuple, list or other indexable object of this format:
+        ((str)PROPERTY_NAME, (anything)PROPERTY_DATA, (int)LIFETIME_HOURS)
+        Otherwise (with saveToDisk=False), 'properties' is an iterable of (name, data) pairs.
 
-    def _flushDiskCacheNames(self):
+        The 'PROPERTY_DATA' or 'data' fields should be JSON-serializable.
         '''
-        Internal. This needs to be used **every time** after setting one or more properties, to make sure
-        the latest disk cache names set is stored in its window memory property.
-        '''
-        self.window.setProperty(self.PROPERTY_DISK_CACHE_NAMES, self._setToString(self.diskCacheNames))
+        if saveToDisk:
+            self._ensureDiskNamesSet()
+            self._ensureDirtyNamesSet()
+
+            for pEntry in properties:
+                propName, data, lifetime = pEntry
+                self._storeCacheProperty(propName, data, lifetime, self._getEpochHours())
+                self.diskNamesSet.add(propName)
+                self.dirtyNamesSet.add(propName) # These properties are being created \ updated and need saving.
+
+            self._storeMemorySet(self.PROPERTY_DISK_NAMES_SET, self.diskNamesSet)
+            self._storeMemorySet(self.PROPERTY_DIRTY_NAMES_SET, self.dirtyNamesSet)
+        else:
+            for propName, data in properties:
+                self.window.setProperty(propName, json.dumps(data)) # Memory-only properties.
 
 
     def getCacheProperty(self, propName, readFromDisk):
         '''
-        Tries to return the JSON--loaded data from a window memory property.
+        Tries to return the data from a window memory property.
         For the pure property string use the setRaw(...)\getRaw(...) functions instead.
         :param propName: Name of the property to retrieve.
-        :param readFromDisk: Used with properties that might be saved on disk (it tries to load
-        from memory first though).
+        :param readFromDisk: Used with properties that might be saved on disk. It tries to load
+        from memory first though, then if it's not in memory we load from its file, if it exists.
         :returns: The property data, if it exists, or None.
         '''
         if readFromDisk:
-            self._ensureCacheLoaded()            
-            if propName not in self.diskCacheNames:
-                return None
+            # A disk-enabled property.
+            # If it's already in the disk names set then it was either added manually or
+            # already loaded from disk into memory.
+            self._ensureDiskNamesSet()
+            if propName in self.diskNamesSet:
+                propRaw = self.window.getProperty(propName)
+                return json.loads(propRaw)[0] if propRaw else None # Data is always the first JSON field.
+            else:
+                # Disk-enabled property isn't in memory yet, try to read it from its file.
+                fileProp = self._tryLoadCacheProperty(propName)
+                if fileProp:
+                    propName, data, lifetime, epoch = fileProp
+                    self._storeCacheProperty(propName, data, lifetime, epoch)
+                    self.diskNamesSet.add(propName)
+                    self._storeMemorySet(self.PROPERTY_DISK_NAMES_SET, self.diskNamesSet)
+                    return data
+                else:
+                    return None
+        else:
+            # A memory-only property, points directly to data.
+            propRaw = self.window.getProperty(propName)
+            return json.loads(propRaw) if propRaw else None
 
-        # Return the first field of the property JSON (the data).
-        # This works the same for memory-only properties.
-        data = self.window.getProperty(propName)
-        return json.loads(data)[0] if data else None
-            
-            
+
+    def getCacheProperties(self, propNames, readFromDisk):
+        '''
+        Retrieves a **generator** to more than one property data at once.
+        The data is guaranteed to come in the same order as the provided names.
+        '''
+        if readFromDisk:
+            self._ensureDiskNamesSet()
+            anyLoadedFromFile = False
+
+            for propName in propNames:
+                if propName in self.diskNamesSet:
+                    propRaw = self.window.getProperty(propName)
+                    yield json.loads(propRaw)[0] if propRaw else None
+                else:
+                    fileProp = self._tryLoadCacheProperty(propName)
+                    if fileProp:
+                        propName, data, lifetime, epoch = fileProp
+                        self._storeCacheProperty(propName, data, lifetime, epoch)
+                        self.diskNamesSet.add(propName)
+                        anyLoadedFromFile = True
+                        yield data
+
+            if anyLoadedFromFile:
+                self._storeMemorySet(self.PROPERTY_DISK_NAMES_SET, self.diskNamesSet)
+        else:
+            for propName in propNames:
+                propRaw = self.window.getProperty(propName)
+                yield json.loads(propRaw) if propRaw else None # Memory-only property, points directly to data.
+
+
     def clearCacheProperty(self, propName, readFromDisk):
         '''
-        Removes a property from memory. The next time the cache is saved this property
+        Removes a property from memory. The next time the cache is saved, this property
         won't be included and therefore forgotten.
         '''
         self.window.clearProperty(propName)
         if readFromDisk:
-            self._ensureCacheLoaded()
-            self.diskCacheNames.discard(propName)
-            self._flushDiskCacheNames()
-            self.setFlag(self.FLAG_CACHE_FILE_FLUSH)
-            self.flushFlags()
-            
+            # Direct way to remove the property name from the comma-separated property name list.
+            diskNamesRaw = self.window.getProperty(self.PROPERTY_DISK_NAMES_SET)
+            self.window.setProperty(
+                self.PROPERTY_DISK_NAMES_SET, diskNamesRaw.replace(propName, '').replace(',,', ',').strip(', ')
+            )
+            dirtyNamesRaw = self.window.getProperty(self.PROPERTY_DIRTY_NAMES_SET)
+            self.window.setProperty(
+                self.PROPERTY_DIRTY_NAMES_SET, dirtyNamesRaw.replace(propName, '').replace(',,', ',').strip(', ')
+            )
+
 
     def setRawProperty(self, propName, data):
         '''
@@ -314,65 +234,128 @@ class SimpleCache():
 
 
     def saveCacheIfDirty(self):
-        if self.testFlag(self.FLAG_CACHE_FILE_FLUSH) and not self.testFlag(self.FLAG_CACHE_FILE_FAILED):
-            if self.diskCacheNames or self._loadMemoryCache():
-                self._saveCache()
-                self.clearFlag(self.FLAG_CACHE_FILE_FLUSH)
-                self.flushFlags()
+        # Optimised way to check if anything needs saving. Most of the time
+        # 'dirtyNamesRaw' will be an empty string, easy to check for truthness.
+        dirtyNamesRaw = self.window.getProperty(self.PROPERTY_DIRTY_NAMES_SET)
+        if dirtyNamesRaw:
+            for propName in dirtyNamesRaw.split(','):
+                self._saveCacheProperty(propName)
+            # Clear the dirty names set (and its window property).
+            self.window.setProperty(self.PROPERTY_DIRTY_NAMES_SET, '')
+            self.dirtyNamesSet = set()
 
 
-    def _saveCache(self):
-        '''
-        Internal.
-        Assumes the destination folder already exists.
-        Assumes 'self.diskCacheNames' has already been refreshed \ updated.
-        '''
-        def __makeSaveData():
-            '''
-            :returns: A generator of dicts, one dict for each window memory
-            property that has 'saveToDisk=True'.
-            Note that the cache version is prepended to each property entry.
-            '''
-            for propName in self.diskCacheNames:
-                propRaw = self.window.getProperty(propName)
-                if propRaw:
-                    # Same structure as in setCacheProperty().
-                    data, saveToDisk, lifetime, epoch = json.loads(propRaw)
-                    if saveToDisk:
-                        yield {
-                            'version': self.CACHE_VERSION,
-                            'propName': propName,                            
-                            'data': data,
-                            'lifetime': lifetime,
-                            'epoch': epoch
-                        }
-        fullPath = self.CACHE_PATH_DIR + self.CACHE_FILENAME    
-        file = xbmcvfs.File(fullPath, 'w')
-        file.write(json.dumps(tuple(__makeSaveData())))
-        file.close()
+    def clearCacheFiles(self):
+        dirPaths, filePaths = xbmcvfs.listdir(self.CACHE_PATH_DIR)
+        for filePath in filePaths:
+            self._writeBlankCacheFile(self.CACHE_PATH_DIR + filePath)
+        # Clear the disk names set. All disk-enabled properties will be forgotten.
+        self.window.setProperty(self.PROPERTY_DISK_NAMES_SET, '')
+        self.diskNamesSet = set()
+        # 'True' if one or more cache files were cleared / reset.
+        return len(filePaths) > 0
 
-        
+
     def _writeBlankCacheFile(self, fullPath):
         '''Assumes the directory to the file exists.'''
         file = xbmcvfs.File(fullPath, 'w')
-        file.write('[]')
+        file.write('null') # JSON equivalent to None.
         file.close()
-        
-        
-    def clearCacheFile(self):
-        fullPath = self.CACHE_PATH_DIR + self.CACHE_FILENAME
-        if xbmcvfs.exists(fullPath):
-            self._writeBlankCacheFile(fullPath)
-            return True
-        return False
-        
+
+
+    def _ensureDiskNamesSet(self):
+        '''
+        For Kodi <= 17.6, used to initialise this class member in case it's invalid.
+        But this function is only called when this member is needed.
+        '''
+        if self.diskNamesSet == None:
+            self.diskNamesSet = self._stringToSet(self.window.getProperty(self.PROPERTY_DISK_NAMES_SET))
+
+
+    def _ensureDirtyNamesSet(self):
+        if self.dirtyNamesSet == None:
+            self.dirtyNamesSet = self._stringToSet(self.window.getProperty(self.PROPERTY_DIRTY_NAMES_SET))
+
+
+    def _storeMemorySet(self, setPropName, setObject):
+        self.window.setProperty(setPropName, self._setToString(setObject))
+
+
+    def _tryLoadCacheProperty(self, propName):
+        '''
+        Tries to load the cache file for the named property.
+        If a cache file doesn't exist for a property, a blank cache file is created.
+        :returns: A tuple of property entries, each entry is a tuple of fields
+        (propName, data, lifetime, epoch).
+        '''
+        currentEpoch = self._getEpochHours()
+        fullPath = self.CACHE_PATH_DIR + propName + '.json'
+        try:
+            if xbmcvfs.exists(fullPath):
+                file = xbmcvfs.File(fullPath)
+                data = file.read()
+                file.close()
+
+                if data and data != 'null':
+                    fileProp = json.loads(data)
+
+                    # Version restriction.
+                    version = fileProp['version']
+                    if version >= self.CACHE_VERSION:
+                        lifetime = fileProp['lifetime']
+                        epoch = fileProp['epoch']
+                        # Lifetime restriction. See if the property lasts forever or if
+                        # the elapsed time since its creation epoch is bigger than its lifetime.
+                        if lifetime == 0 or lifetime >= abs(currentEpoch - epoch):
+                           return (fileProp['propName'], fileProp['data'], lifetime, epoch)
+            else:
+                # Initialize a blank cache file.
+                xbmcvfs.mkdir(self.CACHE_PATH_DIR)
+                self._writeBlankCacheFile(fullPath)
+        except:
+            pass
+        return None # Fall-through.
+
+
+    def _storeCacheProperty(self, propName, data, lifetime, epoch):
+        '''
+        Internal.
+        Stores data in a persistent XBMC window memory property.
+        '''
+        self.window.setProperty(propName, json.dumps((data, lifetime, epoch)))
+
+
+    def _saveCacheProperty(self, propName):
+        '''
+        Internal.
+        Saves a specific dirty, disk-enabled property to disk.
+        Assumes the destination folder already exists.
+        '''
+        propRaw = self.window.getProperty(propName)
+        if propRaw:
+            # Base structure as in _storeCacheProperty(), with the cache version added.
+            data, lifetime, epoch = json.loads(propRaw)
+            file = xbmcvfs.File(self.CACHE_PATH_DIR + propName + '.json', 'w')
+            file.write(
+                json.dumps(
+                    {
+                        'version': self.CACHE_VERSION,
+                        'propName': propName,
+                        'lifetime': lifetime,
+                        'epoch': epoch,
+                        'data': data
+                    }
+                )
+            )
+            file.close()
+
 
     def _setToString(self, setObject):
-        return (','.join(element for element in setObject))
+        return ','.join(element for element in setObject)
 
 
     def _stringToSet(self, text):
-        return set(text.split(','))
+        return set(text.split(',')) if text else set() # The IF is to get a truly empty set, else it'd hold an empty string.
 
 
     def _getEpochHours(self):
@@ -382,4 +365,4 @@ class SimpleCache():
         return int(time() // 3600.0)
 
 
-cache = SimpleCache()
+simpleCache = SimpleCache()

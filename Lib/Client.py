@@ -17,7 +17,7 @@ import xbmcaddon
 import xbmcplugin
 
 #from Lib.SimpleTVDB import tvdb # Unused. Potentially get per-episode thumbnails and descriptions in the future.
-from Lib.SimpleCache import cache
+from Lib.SimpleCache import simpleCache as cache
 from Lib.RequestHelper import requestHelper
 from Lib.CatalogHelper import catalogHelper
 
@@ -75,15 +75,15 @@ def viewSettings(params):
 
 
 def viewClearCache(params):
-    if cache.clearCacheFile():
+    if cache.clearCacheFiles():
         dialog = xbmcgui.Dialog()
-        dialog.notification('Toonmania2', 'Cache file cleared', xbmcgui.NOTIFICATION_INFO, 4000, True)
+        dialog.notification('Toonmania2', 'Cache file cleared', xbmcgui.NOTIFICATION_INFO, 3500, True)
 
-    # Close the settings dialog when it was opened from within this add-on.        
+    # Close the settings dialog when it was opened from within this add-on.
     if 'toonmania2' in xbmc.getInfoLabel('Container.PluginName'):
         xbmc.executebuiltin('Dialog.Close(all)')
-    
-    
+
+
 def viewAnimetoonMenu(params):
     '''
     Directory for the Animetoon website.
@@ -146,10 +146,13 @@ def _viewSearchResults(params, text):
     '''
     searchResults = tuple(catalogHelper.nameSearchEntries(params['api'], text)) # Does the actual web requests.
     if searchResults:
+
+        cache.saveCacheIfDirty()
+        
         # Use a comma-separated list of the result show\movie IDs as parameter.
         # See CatalogHelper.makeCatalogEntry() for info on catalog entry structure.
         searchIDs = ','.join(entryID for entryID in searchResults)
-        
+
         # Go straight to the 'ALL' catalog section instead of the main catalog menu, because the name search
         # results are usually fewer so it's more convenient.
         # *** The API should be kept the same as the one used in the search. ***
@@ -163,8 +166,8 @@ def _viewSearchResults(params, text):
     else:
         xbmcplugin.addDirectoryItem(int(sys.argv[1]), '', xbmcgui.ListItem('No Items Found'), False)
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
-    
-    # Use the same layout settings as the main catalog menu.    
+
+    # Use the same layout settings as the main catalog menu.
     useCatalogLayout, layoutType = ADDON_SETTINGS['layoutCatalog']
     if useCatalogLayout:
         xbmc.executebuiltin('Container.SetViewMode(' + layoutType + ')')
@@ -221,7 +224,7 @@ def viewSearchGenre(params):
         _PROPERTY_GENRE_NAMES = 'tmania2.prop.toonGenres'
     else:
         _PROPERTY_GENRE_NAMES = 'tmania2.prop.plusGenres'
-        
+
     genreList = cache.getCacheProperty(_PROPERTY_GENRE_NAMES, readFromDisk = True)
     if not genreList:
         # The data from the '/GetGenres/' route is a dict with a list of genre names like "Action",
@@ -230,7 +233,7 @@ def viewSearchGenre(params):
         requestHelper.delayBegin()
         genreList = requestHelper.routeGET(route).get('genres', [ ])
         requestHelper.delayEnd()
-        # Store the current API genres in a disk-persistent property with the default lifetime of 1 week.
+        # Store the current API genres in a disk-persistent property with 1 week of lifetime.
         cache.setCacheProperty(_PROPERTY_GENRE_NAMES, genreList, saveToDisk = True, lifetime = cache.LIFETIME_ONE_WEEK)
 
     listItems = (
@@ -296,11 +299,11 @@ def viewCatalogSection(params):
     xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
 
     catalog = catalogHelper.getCatalog(params)
-    
+
     # Special-case when coming in from a search results folder (usually from a Favourite),
     # it's a nice moment to save the cache, if necessary.
     if 'searchIDs' in params:
-        cache.saveCacheIfDirty()        
+        cache.saveCacheIfDirty()
 
     def _catalogSectionItems(iterable):
         api = params['api']
@@ -492,8 +495,9 @@ def viewListEpisodes(params):
     '''
     xbmcplugin.setContent(int(sys.argv[1]), 'episodes')
 
-    # Optional, sort episode list by labels.
-    #xbmcplugin.addSortMethod(int(sys.argv[1]), xbmcplugin.SORT_METHOD_LABEL_IGNORE_THE)
+    # Sort episode list by labels. In some rare cases the episode date is set wrong,
+    # so Kodi lists them out of order.
+    xbmcplugin.addSortMethod(int(sys.argv[1]), xbmcplugin.SORT_METHOD_LABEL_IGNORE_THE)
 
     api = params['api']
     jsonData = None
@@ -561,12 +565,7 @@ def viewListEpisodes(params):
                 newUrl = dirItem[0] + '&stream=' + urlencode(episodeStreams[0])
                 xbmcplugin.addDirectoryItem(int(sys.argv[1]), newUrl, dirItem[1], False)
         else:
-            dialog = xbmcgui.Dialog()
-            dialog.notification('Toonmania2', 'No streams found', xbmcgui.NOTIFICATION_INFO, 3000, False)
-            xbmc.log(
-                'Toonmania2 | No streams for API:%s SHOW:%s EPISODE:%s' % (params['api'], params['id'], episodeEntry['id']),
-                xbmc.LOGWARNING
-            )
+            logStreamError(params['api'], api, episodeEntry['id'])
 
     xbmcplugin.endOfDirectory(int(sys.argv[1]), cacheToDisc = False)
 
@@ -588,7 +587,7 @@ def viewResolve(params):
     else:
          streams = getEpisodeStreams(params['api'], params['episodeID'])
          stream = streams[0] if streams else None
-         
+
     if stream:
         item = xbmcgui.ListItem(params['name'])
         setupListItem(
@@ -606,8 +605,7 @@ def viewResolve(params):
         item.setPath(stream)
         xbmcplugin.setResolvedUrl(int(sys.argv[1]), True, item)
     else:
-        dialog = xbmcgui.Dialog()
-        dialog.notification('Toonmania2', 'No streams found', xbmcgui.NOTIFICATION_INFO, 3000, False)
+        logStreamError(params['api'], params['showTitle'], params['episodeID'])        
         xbmcplugin.setResolvedUrl(int(sys.argv[1]), False, xbmcgui.ListItem('None'))
 
 
@@ -675,6 +673,12 @@ def setupListItem(item, showTitle, title, isPlayable, season, episode, genres, t
     if episode:
         itemInfo.update({'season': season, 'episode': episode})
     item.setInfo('video', itemInfo)
+    
+    
+def logStreamError(api, showID, episodeID):
+    dialog = xbmcgui.Dialog()
+    dialog.notification('Toonmania2', 'No streams found', xbmcgui.NOTIFICATION_INFO, 3000, True)
+    xbmc.log('Toonmania2 | No streams for API:%s SHOW:%s EPISODE:%s' % (api, showID, episodeID), xbmc.LOGWARNING)
 
 
 def buildURL(query):
