@@ -16,10 +16,11 @@ import xbmcgui
 import xbmcaddon
 import xbmcplugin
 
-#from Lib.SimpleTVDB import tvdb # Unused. Potentially get per-episode thumbnails and descriptions in the future.
+from Lib.Providers import getEpisodeProviders, resolveProviderURL
 from Lib.SimpleCache import simpleCache as cache
 from Lib.RequestHelper import requestHelper
 from Lib.CatalogHelper import catalogHelper
+#from Lib.SimpleTVDB import tvdb # Unused. Potentially get per-episode thumbnails and descriptions in the future.
 
 # Addon user settings. See also viewSettings() and reloadSettings().
 ADDON = xbmcaddon.Addon()
@@ -148,7 +149,7 @@ def _viewSearchResults(params, text):
     if searchResults:
 
         cache.saveCacheIfDirty()
-        
+
         # Use a comma-separated list of the result show\movie IDs as parameter.
         # See CatalogHelper.makeCatalogEntry() for info on catalog entry structure.
         searchIDs = ','.join(entryID for entryID in searchResults)
@@ -380,39 +381,6 @@ def viewCatalogSection(params):
         xbmc.executebuiltin('Container.SetViewMode(' + layoutType + ')')
 
 
-def getEpisodeStreams(api, episodeID):
-    '''
-    Helper function to retrieve a list of direct streams from an episode \ movie ID.
-    Streams from the '?direct' route are a list of lists of sources (dicts):
-    streams = [
-        [ {source for part1}, {alternative source for part1} ], [ {source for part2}, {...} ]
-    ]
-    The sublist is for different sources of the same part (the source might be from 'storage'
-    or 'picasa' for example).
-    '''
-    requestHelper.setAPISource(api)
-    requestHelper.delayBegin()
-    jsonData = requestHelper.routeGET('/GetVideos/' + episodeID + '?direct')
-    requestHelper.delayEnd(1000)
-
-    if jsonData:
-        episodeStreams = [ ]
-        for part in jsonData:
-            for source in part:
-                if source['source'] == 'storage':
-                    episodeStreams.append(source['link'])
-                    break
-            else:
-                episodeStreams.append(part[0]['link']) # If there's no 'storage' type source, use any other source.
-        return episodeStreams
-    else:
-        # Return any list of streams, no matter the provider.
-        # They usually resolve to the same host, "gateway.play44.net".
-        from Lib.Providers import resolveEpisodeProviders
-        resolvedProviders = resolveEpisodeProviders(api, episodeID)
-        return resolvedProviders[0] if resolvedProviders else None
-
-
 def _makeEpisodeItems(api, episodes, showTitle, showGenres, showThumb, showPlot, showDate):
     '''
     Converts a list of JSON episode entries into a list of playable xbmcgui.ListItem
@@ -454,7 +422,7 @@ def _makeEpisodeItems(api, episodes, showTitle, showGenres, showThumb, showPlot,
         )
 
 
-def _makeEpisodePartItems(episodeEntry, streams, showTitle, showGenres, showThumb, showPlot, showDate):
+def _makeEpisodePartItems(episodeEntry, providers, showTitle, showGenres, showThumb, showPlot, showDate):
     '''
     Similar logic to _makeEpisodeItems(), but it works on just one item with multiple streams.
     This will make one (repeated) xbmc.ListItem for the several parts, each part points to a stream.
@@ -462,28 +430,29 @@ def _makeEpisodePartItems(episodeEntry, streams, showTitle, showGenres, showThum
     episodeName = episodeEntry['name']
     season, episode = getTitleInfo(episodeName)
     episodeDate = episodeEntry['date'][ : 10] if 'date' in episodeEntry else showDate
-    for index, stream in enumerate(streams, 1):
-        partName = episodeName + ' | [B]PART ' + str(index) + '[/B]'
-        item = xbmcgui.ListItem(partName)
-        setupListItem(item, showTitle, partName, True, season, episode, showGenres, showThumb, showPlot, episodeDate)
-        yield (
-            buildURL(
-                {
-                    'view': 'RESOLVE',
-                    'showTitle': showTitle,
-                    'name': partName, # The part name is set as the item label used to play it.
-                    'season': str(season),
-                    'episode': str(episode),
-                    'genres': ','.join(showGenres),
-                    'thumb': showThumb,
-                    'plot': showPlot,
-                    'date': episodeDate,
-                    'stream': stream,
-                }
-            ),
-            item,
-            False
-        )
+    for providerName, providerURLs in providers.iteritems():
+        for partIndex, providerURL in enumerate(providerURLs, 1):
+            partName = '[B]%s[/B] | %s | [B]PART %i[/B]' % (providerName, episodeName, partIndex)
+            item = xbmcgui.ListItem(partName)
+            setupListItem(item, showTitle, partName, True, season, episode, showGenres, showThumb, showPlot, episodeDate)
+            yield (
+                buildURL(
+                    {
+                        'view': 'RESOLVE',
+                        'showTitle': showTitle,
+                        'name': partName, # Part name is later set as the item label used to play it.
+                        'season': str(season),
+                        'episode': str(episode),
+                        'genres': ','.join(showGenres),
+                        'thumb': showThumb,
+                        'plot': showPlot,
+                        'date': episodeDate,
+                        'providerURL': providerURL
+                    }
+                ),
+                item,
+                False
+            )
 
 
 def viewListEpisodes(params):
@@ -503,8 +472,8 @@ def viewListEpisodes(params):
     jsonData = None
 
     # Cache (memory-only) the episode list of the show, as the user might watch more than one in sequence.
-    _PROPERTY_LAST_SHOW_DETAILS = 'tmania2.prop.lastDetails'
-    lastShowDetails = cache.getCacheProperty(_PROPERTY_LAST_SHOW_DETAILS, readFromDisk = False)
+    _PROPERTY_LAST_SHOW_DETAILS = 'tmania2.prop.lastShow'
+    lastShowDetails = cache.getCacheProperty(_PROPERTY_LAST_SHOW_DETAILS, readFromDisk=False)
     showKey = params['id'] + api
     if lastShowDetails and showKey in lastShowDetails:
         jsonData = lastShowDetails[showKey] # Use the show ID + API name as the unique identifier.
@@ -513,7 +482,7 @@ def viewListEpisodes(params):
         requestHelper.delayBegin()
         jsonData = requestHelper.routeGET('/GetDetails/' + params['id'])
         if jsonData:
-            cache.setCacheProperty(_PROPERTY_LAST_SHOW_DETAILS, {showKey: jsonData}, saveToDisk = False)
+            cache.setCacheProperty(_PROPERTY_LAST_SHOW_DETAILS, {showKey: jsonData}, saveToDisk=False)
         requestHelper.delayEnd()
 
     # Genres, thumb and plot are taken from the parent show \ movie.
@@ -534,35 +503,35 @@ def viewListEpisodes(params):
         # For a single episode, this is probably a movie, OVA or special (considered as a "1 episode show").
         # Try to get the direct stream links to see if it's a movie (which are always multi-part).
         episodeEntry = jsonData['episode'][0]
-        episodeStreams = None
+        episodeProviders = None
 
         # Cache (memory-only) this request, as it might be for a multi part video (a movie)
         # where the user would go back and forth a lot on this view to watch all the movie parts.
-        _PROPERTY_LAST_EPISODE_STREAMS = 'tmania2.prop.lastStreams'
-        lastEpisodeStreams = cache.getCacheProperty(_PROPERTY_LAST_EPISODE_STREAMS, readFromDisk = False)
+        _PROPERTY_LAST_EPISODE_DETAILS = 'tmania2.prop.lastEpisode'
+        lastEpisodeDetails = cache.getCacheProperty(_PROPERTY_LAST_EPISODE_DETAILS, readFromDisk=False)
         episodeKey = episodeEntry['id'] + api
-        if lastEpisodeStreams and episodeKey in lastEpisodeStreams:
-            episodeStreams = lastEpisodeStreams[episodeKey]
+        if lastEpisodeDetails and episodeKey in lastEpisodeDetails:
+            episodeProviders = lastEpisodeDetails[episodeKey]
         else:
-            episodeStreams = getEpisodeStreams(api, episodeEntry['id'])
-            if episodeStreams:
-                cache.setCacheProperty(_PROPERTY_LAST_EPISODE_STREAMS, {episodeKey: episodeStreams}, saveToDisk = False)
+            episodeProviders = getEpisodeProviders(api, episodeEntry['id'])
+            if episodeProviders:
+                cache.setCacheProperty(_PROPERTY_LAST_EPISODE_DETAILS, {episodeKey: episodeProviders}, saveToDisk=False)
 
-        if episodeStreams:
-            if len(episodeStreams) > 1:
+        if episodeProviders:
+            if len(next(episodeProviders.itervalues())) > 1: # If it's a multi-video-part media.
                 xbmcplugin.addDirectoryItems(
                     int(sys.argv[1]),
                     tuple(
                         _makeEpisodePartItems(
-                            episodeEntry, episodeStreams, showTitle, showGenres, showThumb, showPlot, showDate
+                            episodeEntry, episodeProviders, showTitle, showGenres, showThumb, showPlot, showDate
                         )
                     )
                 )
             else:
-                # The item doesn't have multiple video parts. List the single item as usual and send its stream
-                # as a URL parameter so it doesn't have to be retrieved again in viewResolve().
+                # The item doesn't have multiple video parts. List the single item as usual and send its providers
+                # as a URL parameter so they don't have to be retrieved again.
                 dirItem = next(_makeEpisodeItems(api, (episodeEntry,), showTitle, showGenres, showThumb, showPlot, showDate))
-                newUrl = dirItem[0] + '&stream=' + urlencode(episodeStreams[0])
+                newUrl = dirItem[0] + '&' + urlencode({'providers': str(episodeProviders)})
                 xbmcplugin.addDirectoryItem(int(sys.argv[1]), newUrl, dirItem[1], False)
         else:
             logStreamError(params['api'], api, episodeEntry['id'])
@@ -581,12 +550,37 @@ def viewResolve(params):
     '''
     cache.saveCacheIfDirty() # Save the cache, only if necessary, before watching a video.
 
-    # If the stream is already included in the parameters, no need to retrieve it in here again.
+    stream = None
+
     if 'stream' in params:
+        # BACKWARDS COMPATIBILITY: Toonmania2 0.4.4.
+        # If the stream is already included in the parameters, no need to retrieve it in here again.
         stream = params['stream']
+    elif 'providerURL' in params:
+        stream = resolveProviderURL(params['providerURL'])
     else:
-         streams = getEpisodeStreams(params['api'], params['episodeID'])
-         stream = streams[0] if streams else None
+        providers = None
+        if 'providers' in params:
+            # Dictionary of providers and their **unresolved** URLs, used with autoplay off.
+            from ast import literal_eval
+            providers = literal_eval(params['providers'])
+        else:
+            providers = getEpisodeProviders(params['api'], params['episodeID'])
+
+        if providers:
+            if ADDON_SETTINGS['autoplay']:
+                from random import choice
+                randomKey = choice(tuple(providers.iterkeys()))
+                stream = resolveProviderURL(providers[randomKey][0])
+            else:
+                index = xbmcgui.Dialog().select('Select Provider', tuple(name for name in providers.iterkeys()))
+                if index >= 0:
+                    chosenKey = next(key for keyIndex, key in enumerate(providers.iterkeys()) if keyIndex == index)
+                    stream = resolveProviderURL(providers[chosenKey][0])
+                else:
+                    # User cancelled the 'Select Provider' dialog.
+                    xbmcplugin.setResolvedUrl(int(sys.argv[1]), False, xbmcgui.ListItem('None'))
+                    return
 
     if stream:
         item = xbmcgui.ListItem(params['name'])
@@ -605,12 +599,13 @@ def viewResolve(params):
         item.setPath(stream)
         xbmcplugin.setResolvedUrl(int(sys.argv[1]), True, item)
     else:
-        logStreamError(params['api'], params['showTitle'], params['episodeID'])        
+        logStreamError(params['api'], params['showTitle'], params['episodeID'])
         xbmcplugin.setResolvedUrl(int(sys.argv[1]), False, xbmcgui.ListItem('None'))
 
 
 def reloadSettings():
     global ADDON_SETTINGS
+    ADDON_SETTINGS['autoplay'] = ADDON.getSetting('autoplay') == 'true'
     ADDON_SETTINGS['showThumbs'] = ADDON.getSetting('show_thumbnails') == 'true'
     ADDON_SETTINGS['pageSize'] = int(ADDON.getSetting('page_size')) # Page size = number of items per catalog section page.
     # Layout settings, each category is a key to a (bool, layoutType) value, eg: 'layoutShows': (True, '55')
@@ -673,8 +668,8 @@ def setupListItem(item, showTitle, title, isPlayable, season, episode, genres, t
     if episode:
         itemInfo.update({'season': season, 'episode': episode})
     item.setInfo('video', itemInfo)
-    
-    
+
+
 def logStreamError(api, showID, episodeID):
     dialog = xbmcgui.Dialog()
     dialog.notification('Toonmania2', 'No streams found', xbmcgui.NOTIFICATION_INFO, 3000, True)
