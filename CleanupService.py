@@ -1,55 +1,58 @@
 # -*- coding: utf-8 -*-
-import os
+'''
+Temporary service to TRY to delete the old single 'cache.json' from previous Toonmania2 versions, as now
+Toonmania2 uses a '/cache/' subfolder with separate files, which is more efficient.
+'''
+from os import path
 
 import xbmc
 import xbmcvfs
 import xbmcaddon
-from xbmcgui import Dialog
 
-
-'''
-Temporary service to TRY to delete the old single 'cache.json' from previous Toonmania2 versions (< 0.4.3), as now
-Toonmania2 uses a '/cache/' subfolder with separate files which is more efficient.
-
-First this service does some file housekeeping, then deletes itself and rewrites Toonmania2's 'addon.xml'
-so it doesn't run again.
-'''
 
 ADDON = xbmcaddon.Addon()
-tasksComplete = False
 
-# 1) Try to delete the old 'cache.json' single file, it if exists.
-# Use the same path as in older versions of Toonmania2.
-addonProfileFolder = xbmc.translatePath(ADDON.getAddonInfo('profile')).decode('utf-8')
-try:
-    oldFilePath = os.path.join(addonProfileFolder, 'cache.json')
-    if xbmcvfs.exists(oldFilePath):
-        xbmcvfs.delete(oldFilePath)
-    # etc.
-    tasksComplete = True
-except:
-    pass
+def finishTasks():
+    try:
+        addonProfileFolder = xbmc.translatePath(ADDON.getAddonInfo('profile')).decode('utf-8')
+        oldFilePath = path.join(addonProfileFolder, 'cache.json')
+        if xbmcvfs.exists(oldFilePath):
+            xbmcvfs.delete(oldFilePath)
+        # etc.
+        return True
+    except:
+        return False
 
-# 2) Remove itself from the add-on folder, and overwrite 'addon.xml' to remove the extension point
-# that ran this service.
-
-addonRootFolder = xbmc.translatePath(ADDON.getAddonInfo('path')).decode('utf-8')
-SERVICE_FILENAME = 'CleanupService.py'
-
-try:
-    serviceScriptPath = os.path.join(addonRootFolder, SERVICE_FILENAME)
-    xbmcvfs.delete(serviceScriptPath)
     
-    addonXMLPath = os.path.join(addonRootFolder, 'addon.xml')
-    with open(addonXMLPath, 'r+') as xmlFile:
-        originalLines = xmlFile.readlines()
-        xmlFile.seek(0)
-        for line in originalLines:
-            if SERVICE_FILENAME not in line: # Ignore the line with your service entry.
-                xmlFile.write(line)
-        xmlFile.truncate()
-    # Now 'addon.xml' doesn't have the service extension point anymore.    
-    if tasksComplete:
-        Dialog().notification('Toonmania2', 'Post-update cleanup successful', xbmcgui.NOTIFICATION_INFO, 4000, False)
-except:
-    pass
+def deleteItself():
+    try:
+        addonRootFolder = xbmc.translatePath(ADDON.getAddonInfo('path')).decode('utf-8')
+        SERVICE_FILENAME = 'CleanupService.py'
+        PATTERN = 'library="' + SERVICE_FILENAME + '"'
+
+        serviceScriptPath = path.join(addonRootFolder, SERVICE_FILENAME)
+        xbmcvfs.delete(serviceScriptPath)
+        
+        addonXMLPath = path.join(addonRootFolder, 'addon.xml')
+        with open(addonXMLPath, 'r+') as xmlFile:
+            originalLines = xmlFile.readlines()
+            xmlFile.seek(0)            
+            for line in originalLines:
+                if PATTERN not in line: # Ignore the line with your service entry.
+                    xmlFile.write(line)
+            xmlFile.truncate()
+        # Now 'addon.xml' doesn't have the service extension point anymore.    
+        return True
+    except:
+        return False
+
+        
+xbmc.log('Toonmania2 | Cleanup Service: starting...', xbmc.LOGNOTICE)    
+    
+# 1) Try to delete the old 'cache.json' single file, it if exists.
+if finishTasks():
+    xbmc.log('Toonmania2 | Cleanup Service: tasks complete.', xbmc.LOGNOTICE)
+
+# 2) Remove itself from the add-on folder and overwrite 'addon.xml' to remove the service extension point.
+if deleteItself():
+    xbmc.log('Toonmania2 | Cleanup Service: successfully deleted itself, will never run again.', xbmc.LOGNOTICE)
