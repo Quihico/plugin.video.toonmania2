@@ -240,9 +240,9 @@ class SimpleCache():
         if dirtyNamesRaw:
             for propName in dirtyNamesRaw.split(','):
                 self._saveCacheProperty(propName)
-            # Clear the dirty names set (and its window property).
-            self.window.setProperty(self.PROPERTY_DIRTY_NAMES_SET, '')
+            # Reset the dirty names set (and its window property).
             self.dirtyNamesSet = set()
+            self.window.setProperty(self.PROPERTY_DIRTY_NAMES_SET, '')            
 
 
     def clearCacheFiles(self):

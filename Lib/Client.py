@@ -3,13 +3,8 @@ import re
 import sys
 from math import ceil
 from itertools import chain, islice
-try:
-    # Python 2.7
-    from urlparse import parse_qs
-    from urllib import urlencode
-except ImportError:
-    # Python 3
-    from urllib.parse import parse_qs, urlencode
+from urlparse import parse_qs
+from urllib import urlencode
 
 import xbmc
 import xbmcgui
@@ -298,13 +293,10 @@ def viewCatalogSection(params):
     (section "C" for example, for C-titled entries).
     '''
     xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
+    
+    cache.saveCacheIfDirty()
 
     catalog = catalogHelper.getCatalog(params)
-
-    # Special-case when coming in from a search results folder (usually from a Favourite),
-    # it's a nice moment to save the cache, if necessary.
-    if 'searchIDs' in params:
-        cache.saveCacheIfDirty()
 
     def _catalogSectionItems(iterable):
         api = params['api']
@@ -390,6 +382,8 @@ def _makeEpisodeItems(api, episodes, showTitle, showGenres, showThumb, showPlot,
     :param episodes: List of JSON episodes from the '/GetDetails/' routes of the APIs.
     :param p(...): Generic parameters from the parent show \ movie, inherited by the episodes.
     '''
+    playlist = getPlaylist()
+
     for episodeEntry in episodes:
         #episode = dict( id=str, name=str, date=str='yyyy-MM-dd (...)' )
         name = episodeEntry['name']
@@ -401,25 +395,23 @@ def _makeEpisodeItems(api, episodes, showTitle, showGenres, showThumb, showPlot,
         episodeDate = episodeEntry['date'][ : 10] if 'date' in episodeEntry else showDate
         tempShowTitle = showTitle if showTitle else name # Try the show title first, fallback to episode name if empty.
         setupListItem(item, tempShowTitle, name, True, season, episode, showGenres, showThumb, showPlot, episodeDate)
-        yield (
-            buildURL(
-                {
-                    'view': 'RESOLVE',
-                    'api': api,
-                    'episodeID': episodeEntry['id'],
-                    'showTitle': showTitle,
-                    'name': name,
-                    'season': str(season),
-                    'episode': str(episode),
-                    'genres': ','.join(showGenres),
-                    'thumb': showThumb,
-                    'plot': showPlot,
-                    'date': episodeDate
-                }
-            ),
-            item,
-            False
+        url = buildURL(
+            {
+                'view': 'RESOLVE',
+                'api': api,
+                'episodeID': episodeEntry['id'],
+                'showTitle': showTitle,
+                'name': name,
+                'season': str(season),
+                'episode': str(episode),
+                'genres': ','.join(showGenres),
+                'thumb': showThumb,
+                'plot': showPlot,
+                'date': episodeDate
+            }
         )
+        playlist.add(url, item)
+        yield (url, item, False)
 
 
 def _makeEpisodePartItems(episodeEntry, providers, showTitle, showGenres, showThumb, showPlot, showDate):
@@ -427,32 +419,38 @@ def _makeEpisodePartItems(episodeEntry, providers, showTitle, showGenres, showTh
     Similar logic to _makeEpisodeItems(), but it works on just one item with multiple streams.
     This will make one (repeated) xbmc.ListItem for the several parts, each part points to a stream.
     '''
+    playlist = getPlaylist()
+    addedFirstProvider = False
+
     episodeName = episodeEntry['name']
     season, episode = getTitleInfo(episodeName)
     episodeDate = episodeEntry['date'][ : 10] if 'date' in episodeEntry else showDate
+
     for providerName, providerURLs in providers.iteritems():
         for partIndex, providerURL in enumerate(providerURLs, 1):
             partName = '[B]%s[/B] | %s | [B]PART %i[/B]' % (providerName, episodeName, partIndex)
             item = xbmcgui.ListItem(partName)
             setupListItem(item, showTitle, partName, True, season, episode, showGenres, showThumb, showPlot, episodeDate)
-            yield (
-                buildURL(
-                    {
-                        'view': 'RESOLVE',
-                        'showTitle': showTitle,
-                        'name': partName, # Part name is later set as the item label used to play it.
-                        'season': str(season),
-                        'episode': str(episode),
-                        'genres': ','.join(showGenres),
-                        'thumb': showThumb,
-                        'plot': showPlot,
-                        'date': episodeDate,
-                        'providerURL': providerURL
-                    }
-                ),
-                item,
-                False
+            url = buildURL(
+                {
+                    'view': 'RESOLVE',
+                    'showTitle': showTitle,
+                    'name': partName, # Part name is later set as the item label used to play it.
+                    'season': str(season),
+                    'episode': str(episode),
+                    'genres': ','.join(showGenres),
+                    'thumb': showThumb,
+                    'plot': showPlot,
+                    'date': episodeDate,
+                    'providerURL': providerURL
+                }
             )
+            if not addedFirstProvider:
+                playlist.add(url, item)
+                
+            yield (url, item, False)            
+
+        addedFirstProvider = True
 
 
 def viewListEpisodes(params):
@@ -601,6 +599,12 @@ def viewResolve(params):
     else:
         logStreamError(params['api'], params['showTitle'], params['episodeID'])
         xbmcplugin.setResolvedUrl(int(sys.argv[1]), False, xbmcgui.ListItem('None'))
+
+
+def getPlaylist():
+    playlist = xbmc.PlayList(xbmc.PLAYLIST_VIDEO)
+    playlist.clear()
+    return playlist
 
 
 def reloadSettings():

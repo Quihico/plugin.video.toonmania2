@@ -37,22 +37,21 @@ class CatalogHelper():
             # Otherwise defaults to the 'genericCatalog' function.
         }
 
-
-    '''
-    The catalog is a dictionary of lists of entries, used to store data between add-on states to make xbmcgui.ListItems:
-    {
-        (1. Sections, as in alphabet sections for list items: #, A, B, C, D, E, F etc., each section holds a tuple of items.)
-        A: (
-            item, item, item, ...    (2. Items, each item is a tuple with the format seen in makeCatalogEntry().)
-        )
-        B: (...)
-        C: (...)
-    }
-    '''
+        
     def getCatalog(self, params):
         '''
         Retrieves the catalog from a persistent window property between different add-on
         states, or recreates the catalog if needed.
+        
+        The catalog is a dictionary of lists of entries, used to store data between add-on states to make xbmcgui.ListItems:
+        {
+            (1. Sections, as in alphabet sections for list items: #, A, B, C, D, E, F etc., each section holds a tuple of items.)
+            A: (
+                item, item, item, ...    (2. Items, each item is a tuple with the format seen in makeCatalogEntry().)
+            )
+            B: (...)
+            C: (...)
+        }
         '''
         def _buildCatalog():
             catalog = self.catalogFunctions.get(params['route'], self.genericCatalog)(params)
@@ -150,7 +149,7 @@ class CatalogHelper():
         api = params['api']
         route = params['route']
 
-        propName = self._diskFriendlyPropName(api+route)
+        propName = self._diskFriendlyPropName(api, route)
         
         jsonData = cache.getCacheProperty(propName, readFromDisk = True)
         if not jsonData:
@@ -310,14 +309,14 @@ class CatalogHelper():
         for route in routeAlls:
             # Try to get the cached property first.
             jsonData = cache.getCacheProperty(
-                self._diskFriendlyPropName(api+route), readFromDisk = True
+                self._diskFriendlyPropName(api, route), readFromDisk = True
             ) 
             if not jsonData:
                 requestHelper.delayBegin()
                 jsonData = requestHelper.routeGET(route)
                 if jsonData:
                     newProperties.append(
-                        (self._diskFriendlyPropName(api+route), jsonData, cache.LIFETIME_THREE_DAYS)
+                        (self._diskFriendlyPropName(api, route), jsonData, cache.LIFETIME_THREE_DAYS)
                     )
                 requestHelper.delayEnd(1000) # Always delay between requests so we don't abuse the source.
             routesData.append(tuple(self.makeCatalogEntry(entry) for entry in jsonData))
@@ -328,12 +327,14 @@ class CatalogHelper():
         return routesData        
         
         
-    def _diskFriendlyPropName(self, propName):
+    def _diskFriendlyPropName(self, api, route):
         '''
         Clean the property name to be harddisk-friendly, as the cache file will have the same
         name of the property plus the '.json' extension.
         '''
-        return propName.replace('/', '_')
+        # Disk-enabled properties are usually named as API + route, something like '0/GetAllCartoon'.
+        # So we replace the slashes with underscores.
+        return (api + route).replace('/', '_')
         
 
 catalogHelper = CatalogHelper()
