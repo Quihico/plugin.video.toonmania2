@@ -1,6 +1,5 @@
 # -*- coding: utf-8 -*-
 import json
-from bs4 import BeautifulSoup
 from string import ascii_uppercase
 from datetime import datetime
 from itertools import chain
@@ -37,12 +36,12 @@ class CatalogHelper():
             # Otherwise defaults to the 'genericCatalog' function.
         }
 
-        
+
     def getCatalog(self, params):
         '''
         Retrieves the catalog from a persistent window property between different add-on
         states, or recreates the catalog if needed.
-        
+
         The catalog is a dictionary of lists of entries, used to store data between add-on states to make xbmcgui.ListItems:
         {
             (1. Sections, as in alphabet sections for list items: #, A, B, C, D, E, F etc., each section holds a tuple of items.)
@@ -67,7 +66,7 @@ class CatalogHelper():
             or params['route'] != lastRoute
             or 'genreName' in params # Special-case for the genre search, same api\route but 'genreName' changes.
             or 'query' in params    # Special-case for the name search, same api\route but 'query' changes.
-            or 'searchIDs' in params # Special-case for search results, we might be coming in from Kodi Favourites.
+            or 'searchData' in params # Special-case for search results, we might be coming in from Kodi Favourites.
         ):
             cache.setRawProperty(self.PROPERTY_CATALOG_API, params['api'])
             cache.setRawProperty(self.PROPERTY_CATALOG_ROUTE, params['route'])
@@ -150,7 +149,7 @@ class CatalogHelper():
         route = params['route']
 
         propName = self._diskFriendlyPropName(api, route)
-        
+
         jsonData = cache.getCacheProperty(propName, readFromDisk = True)
         if not jsonData:
             requestHelper.setAPISource(api)
@@ -206,12 +205,15 @@ class CatalogHelper():
         '''
         Gerates a catalog from show\movie IDs from a name search.
         '''
-        searchIDs = params.get('searchIDs', '').split(',')
-        if searchIDs:
-            # A search result filtering needs all of the items of the searched API loaded to compare IDs with.
-            allData = self._getMainRoutesData(params['api'])
-            idDict = {entry[0]: entry for entry in chain.from_iterable(allData)}
-            return self.catalogFromIterable(idDict[resultID] for resultID in searchIDs if resultID in idDict)
+        from ast import literal_eval
+        searchData = literal_eval(params.get('searchData', 'None'))
+        if searchData:
+            return self.catalogFromIterable(
+                self.makeCatalogEntry(
+                    {'id': resultItem[0], 'name': resultItem[1], 'description': resultItem[2], 'genres':[]}
+                )
+                for resultItem in searchData
+            )
         else:
             return self.getEmptyCatalog()
 
@@ -229,66 +231,6 @@ class CatalogHelper():
         )
 
 
-    def nameSearchEntries(self, api, text):
-        '''
-        This name search is done with their own website search.
-        :returns: A list of entry IDs found in the search.
-        '''
-        requestHelper.setAPISource(api) # Updates the internal search URL.
-        requestHelper.setDesktopHeader() # Desktop user agent spoofing.
-
-        requestHelper.delayBegin()
-        r = requestHelper.searchGET(text)
-        requestHelper.delayEnd(1500)
-        if not r.ok:
-            return ( )
-
-        soup1 = BeautifulSoup(r.text, 'html.parser')
-        mainUL = soup1.find('div', {'class': 'series_list'}).ul
-
-        # Early exit test. No point in going further if there's no search results.
-        if not mainUL.find('li'):
-            return ( )
-        allULs = [mainUL]
-
-        # A name search needs all of the items of the current API loaded, to compare IDs with.
-        # Make a dictionary to map entry IDs to the entries themselves.
-        allData = self._getMainRoutesData(api)
-        idDict = {entry[0]: entry for entry in chain.from_iterable(allData)}
-
-        # Helper function to find the entry with the same ID as the one from the search results.
-        def _nameSearchEntriesHelper(mainULs):
-            for ul in mainULs:
-                for li in ul.find_all('li'):
-                    img  = li.find('img')
-                    if img:
-                        src = img['src']
-                        # Assuming the thumb images of search results always end with
-                        # '.jpg' (4 characters long), the IDs of search results can be
-                        # obtained from these thumb URLs.
-                        thumbID = src[src.rfind('/')+1 : -4] # Grab the 'xxxx' from '..../small/xxxx.jpg'.
-                        if thumbID in idDict: # Only yield entries we know about.
-                            yield thumbID
-
-        # When there's more than one page of results there'll be buttons for pagination.
-        # Request and scrape these other pages.
-        paginationDIV = soup1.find('ul', {'class': 'pagination'})
-        if paginationDIV:
-            for button in paginationDIV.find_all('button'):
-                nextURL = button.get('href', None)
-                if nextURL:
-                
-                    requestHelper.delayBegin()
-                    r2 = requestHelper.GET(nextURL)
-                    if r2.ok:
-                        soup2 = BeautifulSoup(r2.text, 'html.parser')
-                        otherUL = soup2.find('div', {'class': 'series_list'}).ul
-                        allULs.append(otherUL)
-                    requestHelper.delayEnd(1500)
-
-        return (entryID for entryID in _nameSearchEntriesHelper(allULs))
-
-        
     def _getMainRoutesData(self, api, customRoute=None):
         '''
         Loads all the main routes from one of the APIs to be used in the "filtering" catalog functions, like
@@ -310,13 +252,13 @@ class CatalogHelper():
             # Try to get the cached property first.
             jsonData = cache.getCacheProperty(
                 self._diskFriendlyPropName(api, route), readFromDisk = True
-            ) 
+            )
             if not jsonData:
                 requestHelper.delayBegin()
                 jsonData = requestHelper.routeGET(route)
                 if jsonData:
                     newProperties.append(
-                        (self._diskFriendlyPropName(api, route), jsonData, cache.LIFETIME_THREE_DAYS)
+                        (cache.diskFriendlyPropName(api + route), jsonData, cache.LIFETIME_THREE_DAYS)
                     )
                 requestHelper.delayEnd(1000) # Always delay between requests so we don't abuse the source.
             routesData.append(tuple(self.makeCatalogEntry(entry) for entry in jsonData))
@@ -324,17 +266,7 @@ class CatalogHelper():
         if newProperties:
             cache.setCacheProperties(newProperties, saveToDisk=True)
 
-        return routesData        
-        
-        
-    def _diskFriendlyPropName(self, api, route):
-        '''
-        Clean the property name to be harddisk-friendly, as the cache file will have the same
-        name of the property plus the '.json' extension.
-        '''
-        # Disk-enabled properties are usually named as API + route, something like '0/GetAllCartoon'.
-        # So we replace the slashes with underscores.
-        return (api + route).replace('/', '_')
-        
+        return routesData
+
 
 catalogHelper = CatalogHelper()

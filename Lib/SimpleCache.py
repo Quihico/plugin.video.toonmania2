@@ -19,17 +19,9 @@ class SimpleCache():
 
     '''
     Cache version log:
-    1: Toonmania2 0.4.0
-
-    2: Toonmania2 0.4.1
-        I realized '/GetNew(...)' and '/GetPopular(...)' routes just need the IDs, not the whole JSON data.
-        If something is in a '/GetPopular(...)' it will definitely be in the corresponding '/GetAll(...)'.
-        So we keep only the IDs and retrieve the full entry from the 'All' routes.
-        This change helps use less disk-space and memory.
-
     3: Toonmania2 0.4.2
         In this cache version we're using separate cache files for each route the user visited.
-        This way uses we less memory because we only need to load the routes the user wants to
+        This way uses less memory because we only need to load the routes that the user wants to
         go to, not one huge file that has everything, with what the user wants or doesn't want.
     '''
     # Cache version, for future extension. Used with properties saved to disk.
@@ -67,7 +59,7 @@ class SimpleCache():
         '''
         Creates a persistent XBMC window memory property.
         :param propName: Name/Identifier the property should have, used to retrieve it later.
-        Needs to be file-system friendly, and cannot have commas in the name.
+        Needs to be file-system friendly, and ** cannot have commas in the name. **
         :param data: Data to store in the property, needs to be JSON-serializable.
         :param saveToDisk: Boolean if this property should be saved to a JSON cache file on
         disk to be loaded on later sessions. Best used for big collections of web-requested data.
@@ -103,6 +95,7 @@ class SimpleCache():
         ((str)PROPERTY_NAME, (anything)PROPERTY_DATA, (int)LIFETIME_HOURS)
         Otherwise (with saveToDisk=False), 'properties' is an iterable of (name, data) pairs.
 
+        The PROPERTY_NAME values should not have commas.
         The 'PROPERTY_DATA' or 'data' fields should be JSON-serializable.
         '''
         if saveToDisk:
@@ -141,7 +134,8 @@ class SimpleCache():
                 return json.loads(propRaw)[0] if propRaw else None # Data is always the first JSON field.
             else:
                 # Disk-enabled property isn't in memory yet, try to read it from its file.
-                fileProp = self._tryLoadCacheProperty(propName)
+                fullPath = self.CACHE_PATH_DIR + propName + '.json'
+                fileProp = self._tryLoadCacheProperty(fullPath)
                 if fileProp:
                     propName, data, lifetime, epoch = fileProp
                     self._storeCacheProperty(propName, data, lifetime, epoch)
@@ -151,7 +145,6 @@ class SimpleCache():
                 else:
                     return None
         else:
-            # A memory-only property, points directly to data.
             propRaw = self.window.getProperty(propName)
             return json.loads(propRaw) if propRaw else None
 
@@ -170,7 +163,8 @@ class SimpleCache():
                     propRaw = self.window.getProperty(propName)
                     yield json.loads(propRaw)[0] if propRaw else None
                 else:
-                    fileProp = self._tryLoadCacheProperty(propName)
+                    fullPath = self.CACHE_PATH_DIR + propName + '.json'
+                    fileProp = self._tryLoadCacheProperty(fullPath)
                     if fileProp:
                         propName, data, lifetime, epoch = fileProp
                         self._storeCacheProperty(propName, data, lifetime, epoch)
@@ -183,14 +177,14 @@ class SimpleCache():
         else:
             for propName in propNames:
                 propRaw = self.window.getProperty(propName)
-                yield json.loads(propRaw) if propRaw else None # Memory-only property, points directly to data.
+                yield json.loads(propRaw) if propRaw else None
 
 
-    def clearCacheProperty(self, propName, readFromDisk):
-        '''
-        Removes a property from memory. The next time the cache is saved, this property
-        won't be included and therefore forgotten.
-        '''
+    '''def clearCacheProperty(self, propName, readFromDisk):
+        #
+        # Removes a property from memory. The next time the cache is saved, this property
+        # won't be included and therefore forgotten.
+        #
         self.window.clearProperty(propName)
         if readFromDisk:
             # Direct way to remove the property name from the comma-separated property name list.
@@ -201,7 +195,7 @@ class SimpleCache():
             dirtyNamesRaw = self.window.getProperty(self.PROPERTY_DIRTY_NAMES_SET)
             self.window.setProperty(
                 self.PROPERTY_DIRTY_NAMES_SET, dirtyNamesRaw.replace(propName, '').replace(',,', ',').strip(', ')
-            )
+            )'''
 
 
     def setRawProperty(self, propName, data):
@@ -224,25 +218,40 @@ class SimpleCache():
         return self.window.getProperty(propName)
 
 
-    def clearRawProperty(self, propName):
+    '''def clearRawProperty(self, propName):
+        #
+        # Clears a direct window property by name.
+        # To clear a property that was created with setCacheProperty()
+        # use clearCacheProperty() instead.
+        #
+        return self.window.clearProperty(propName)'''
+
+
+    def diskFriendlyPropName(self, name):
         '''
-        Clears a direct window property by name.
-        To clear a property that was created with setCacheProperty()
-        use clearCacheProperty() instead.
+        Cleans a name to be harddisk-friendly, as the cache file will have the same
+        name of the property plus the '.json' extension.
         '''
-        return self.window.clearProperty(propName)
+        return name.replace('/', '_')
 
 
     def saveCacheIfDirty(self):
+        '''
+        Saves the disk-enabled properties that are dirty to their own files.
+        '''
         # Optimised way to check if anything needs saving. Most of the time
         # 'dirtyNamesRaw' will be an empty string, easy to check for truthness.
         dirtyNamesRaw = self.window.getProperty(self.PROPERTY_DIRTY_NAMES_SET)
         if dirtyNamesRaw:
+            if not xbmcvfs.exists(self.CACHE_PATH_DIR):
+                xbmcvfs.mkdir(self.CACHE_PATH_DIR)
+
             for propName in dirtyNamesRaw.split(','):
                 self._saveCacheProperty(propName)
-            # Reset the dirty names set (and its window property).
+
+            # Reset the dirty names set and its window property.
             self.dirtyNamesSet = set()
-            self.window.setProperty(self.PROPERTY_DIRTY_NAMES_SET, '')            
+            self.window.setProperty(self.PROPERTY_DIRTY_NAMES_SET, '')
 
 
     def clearCacheFiles(self):
@@ -252,15 +261,7 @@ class SimpleCache():
         # Clear the disk names set. All disk-enabled properties will be forgotten.
         self.window.setProperty(self.PROPERTY_DISK_NAMES_SET, '')
         self.diskNamesSet = set()
-        # 'True' if one or more cache files were cleared / reset.
-        return len(filePaths) > 0
-
-
-    def _writeBlankCacheFile(self, fullPath):
-        '''Assumes the directory to the file exists.'''
-        file = xbmcvfs.File(fullPath, 'w')
-        file.write('null') # JSON equivalent to None.
-        file.close()
+        return len(filePaths) > 0 # Return True if at least one file was cleared.
 
 
     def _ensureDiskNamesSet(self):
@@ -281,17 +282,25 @@ class SimpleCache():
         self.window.setProperty(setPropName, self._setToString(setObject))
 
 
-    def _tryLoadCacheProperty(self, propName):
+
+    def _writeBlankCacheFile(self, fullPath):
+        '''
+        Initializes a blank cache file.
+        '''
+        file = xbmcvfs.File(fullPath, 'w')
+        file.write('null') # JSON equivalent to None.
+        file.close()
+
+
+    def _tryLoadCacheProperty(self, fullPath):
         '''
         Tries to load the cache file for the named property.
-        If a cache file doesn't exist for a property, a blank cache file is created.
         :returns: A tuple of property entries, each entry is a tuple of fields
         (propName, data, lifetime, epoch).
         '''
         currentEpoch = self._getEpochHours()
-        fullPath = self.CACHE_PATH_DIR + propName + '.json'
-        try:
-            if xbmcvfs.exists(fullPath):
+        if xbmcvfs.exists(fullPath):
+            try:
                 file = xbmcvfs.File(fullPath)
                 data = file.read()
                 file.close()
@@ -305,21 +314,17 @@ class SimpleCache():
                         lifetime = fileProp['lifetime']
                         epoch = fileProp['epoch']
                         # Lifetime restriction. See if the property lasts forever or if
-                        # the elapsed time since its creation epoch is bigger than its lifetime.
+                        # its age is now bigger than its lifetime.
                         if lifetime == 0 or lifetime >= abs(currentEpoch - epoch):
                            return (fileProp['propName'], fileProp['data'], lifetime, epoch)
-            else:
-                # Initialize a blank cache file.
-                xbmcvfs.mkdir(self.CACHE_PATH_DIR)
-                self._writeBlankCacheFile(fullPath)
-        except:
-            pass
-        return None # Fall-through.
+            except:
+                return None
+        else:
+            return None
 
 
     def _storeCacheProperty(self, propName, data, lifetime, epoch):
         '''
-        Internal.
         Stores data in a persistent XBMC window memory property.
         '''
         self.window.setProperty(propName, json.dumps((data, lifetime, epoch)))
@@ -327,7 +332,6 @@ class SimpleCache():
 
     def _saveCacheProperty(self, propName):
         '''
-        Internal.
         Saves a specific dirty, disk-enabled property to disk.
         Assumes the destination folder already exists.
         '''
