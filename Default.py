@@ -1,4 +1,4 @@
 # -*- coding: utf-8 -*-
-from Lib.Client import main
+from Lib.Plugin import main
 
-main() # See bottom of client.py.
+main() # See bottom of Plugin.py.
