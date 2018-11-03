@@ -21,4 +21,7 @@
     <category label="Cache">
         <setting id="clear_cache" label="Clear Cache Files" type="action" action="RunPlugin(plugin://plugin.video.toonmania2/?view=CLEAR_CACHE)"/>
     </category>
+    <category label="Trakt">
+        <setting id="clear_trakt" label="Clear Trakt Tokens" type="action" action="RunPlugin(plugin://plugin.video.toonmania2/?view=CLEAR_TRAKT)"/>
+    </category>
 </settings>
