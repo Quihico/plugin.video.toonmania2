@@ -26,6 +26,17 @@ class SimpleTrakt():
 
     @classmethod
     def clearTokens(cls, addon):
+        accessToken = addon.getSetting('trakt_access')
+        if accessToken:
+            requests.post(
+                cls.TRAKT_API_URL + '/oauth/revoke',
+                json = {
+                    'access_token': accessToken,
+                    'client_id': cls.CLIENT_ID,
+                    'client_secret': cls.CLIENT_SECRET
+                },
+                timeout = 10
+            )
         addon.setSetting('trakt_access', '')
         addon.setSetting('trakt_refresh', '')
         return True
@@ -112,6 +123,7 @@ class SimpleTrakt():
             else:
                 progressDialog.close()
             return None
+            
         else:
             self._notification('Toonmania2', 'Trakt request failed', useSound=True, isError=True)
             return None
@@ -137,7 +149,7 @@ class SimpleTrakt():
                 addon.setSetting('trakt_refresh', refreshToken) # The refresh token also updates.
                 self.session.headers.update({'Authorization': 'Bearer ' + accessToken})
                 return True
-        return False # Should never happen, 'trakt_refresh' was initialized in ensureAuthorized().
+        return False
 
 
     def _traktRequest(self, path, data, addon=None):

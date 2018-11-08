@@ -131,10 +131,8 @@ def _viewSearchResults(params, text):
     '''
     searchData = requestHelper.nameSearchEntries(params['api'], text) # Does the actual web requests.
     if searchData:
-        cache.saveCacheIfDirty()
-
-        # Go straight to the 'ALL' catalog section instead of the main catalog menu, because the name search
-        # results are usually fewer so it's more convenient.
+        # Make an item leading to the the 'ALL' catalog section instead of the main catalog menu, because
+        # the name search results are usually fewer.
         params.update(
             {
                 'view': 'CATALOG_SECTION',
@@ -144,10 +142,18 @@ def _viewSearchResults(params, text):
                 'searchData': repr(searchData)
             }
         )
-        from string import capwords
-        item = xbmcgui.ListItem('[COLOR orange][B]' + capwords(text) + '[/B][/COLOR] Search Results')
-        item.setArt({'icon': 'DefaultFolder.png', 'thumb': 'DefaultFolder.png'})
-        xbmcplugin.addDirectoryItem(int(sys.argv[1]), buildURL(params), item, True)
+
+        # See if the user wants a favouritable search results item.
+        if isSettingTrue('show_search_parent'):
+            cache.saveCacheIfDirty()
+            from string import capwords
+            item = xbmcgui.ListItem('[COLOR orange][B]' + capwords(text) + '[/B][/COLOR] Search Results')
+            item.setArt({'icon': 'DefaultFolder.png', 'thumb': 'DefaultFolder.png'})
+            xbmcplugin.addDirectoryItem(int(sys.argv[1]), buildURL(params), item, True)
+        else:
+            # Show the results right now.
+            viewCatalogSection(params)
+            return
     else:
         xbmcplugin.addDirectoryItem(int(sys.argv[1]), '', xbmcgui.ListItem('No Items Found'), False)
     xbmcplugin.endOfDirectory(int(sys.argv[1]))
@@ -261,7 +267,7 @@ def viewTraktMenu(params):
                 )
 
         xbmcplugin.addDirectoryItems(int(sys.argv[1]), tuple(_traktMenuItems()))
-        xbmcplugin.endOfDirectory(int(sys.argv[1]))
+        xbmcplugin.endOfDirectory(int(sys.argv[1])) # Only finished the directory if the user is authorized.
 
 
 def viewTraktList(params):
@@ -298,12 +304,11 @@ def viewClearTrakt(params):
     # Need to wait a bit and recreate the xbmcaddon.Addon() reference, otherwise the settings
     # don't seem to be changed.
     # See https://forum.kodi.tv/showthread.php?tid=290353&pid=2425543#pid2425543.
-
     global ADDON
     xbmc.sleep(500)
     if trakt.clearTokens(ADDON):
         dialog = xbmcgui.Dialog()
-        dialog.notification('Toonmania2', 'Trakt tokens cleared', xbmcgui.NOTIFICATION_INFO, 3500, True)
+        dialog.notification('Toonmania2', 'Trakt tokens cleared', xbmcgui.NOTIFICATION_INFO, 3500, False)
 
     ADDON = xbmcaddon.Addon()
 
@@ -353,10 +358,12 @@ def viewCatalogSection(params):
     (section "C" for example, for C-titled entries).
     '''
     xbmcplugin.setContent(int(sys.argv[1]), 'tvshows')
-
+    
     cache.saveCacheIfDirty()
 
     catalog = catalogHelper.getCatalog(params)
+    showThumbs = isSettingTrue('show_thumbnails')
+    sectionKey = params['section']
 
     def _catalogSectionItems(iterable):
         api = params['api']
@@ -365,7 +372,7 @@ def viewCatalogSection(params):
         for entry in iterable:
             # entry = (id, name, description, genres, dateReleased), see CatalogHelper.makeCatalogEntry() for more info.
             item = xbmcgui.ListItem(entry[1])
-            thumb = requestHelper.makeThumbURL(entry[0]) if ADDON_SETTINGS['showThumbs'] else ''
+            thumb = requestHelper.makeThumbURL(entry[0]) if showThumbs else ''
             date = entry[4] if entry[4] else ''
             setupListItem(item, entry[1], entry[1], False, 0, 0, entry[3], thumb = thumb, plot = entry[2], date = date)
             yield (
@@ -384,12 +391,12 @@ def viewCatalogSection(params):
                 True
             )
 
-    sectionKey = params['section']
-
-    if ADDON_SETTINGS['showThumbs']:
+            
+            
+    if showThumbs:
         # Display items in pages so the thumbs are loaded in chunks to not overburden the source website.
         page = int(params['page']) # Zero-based index.
-        pageSize = ADDON_SETTINGS['pageSize']
+        pageSize = int(ADDON.getSetting('page_size')) # Page size = number of items per catalog section page.
         start = page * pageSize
         stop = start + pageSize
 
@@ -544,7 +551,7 @@ def viewListEpisodes(params):
     # But the date of the parent show \ movie will only be used if the individual episode doesn't have a date itself.
     showTitle = jsonData.get('name', '')
     showGenres = params['genres'].split(',')
-    showThumb = params.get('thumb', '') # Might be empty in case ADDON_SETTINGS['showThumbs'] is off.
+    showThumb = params.get('thumb', '') # Might be empty in case 'show_thumbnails' setting is off.
     showPlot = params['plot']
     showDate = params.get('date', '')
 
@@ -623,7 +630,7 @@ def viewResolve(params):
             providers = getEpisodeProviders(params['api'], params['episodeID'])
 
         if providers:
-            if ADDON_SETTINGS['autoplay']:
+            if isSettingTrue('autoplay'):
                 from random import choice
                 randomKey = choice(tuple(DICT_ITER_KEYS(providers)))
                 stream = resolveProviderURL(providers[randomKey][0])
@@ -665,17 +672,20 @@ def getPlaylist():
 
 
 def reloadSettings():
+    '''
+    Loads some global settings. Other settings are used sparingly, only when needed.
+    '''
     global ADDON_SETTINGS
-    ADDON_SETTINGS['autoplay'] = ADDON.getSetting('autoplay') == 'true'
-    ADDON_SETTINGS['showThumbs'] = ADDON.getSetting('show_thumbnails') == 'true'
-    ADDON_SETTINGS['pageSize'] = int(ADDON.getSetting('page_size')) # Page size = number of items per catalog section page.
-
     # Layout settings, each category is a key to a (bool, layoutType) value, eg: 'layoutShows': (True, '55')
     for element in ('catalog', 'shows', 'episodes'):
         ADDON_SETTINGS['layout' + element.capitalize()] = (
             ADDON.getSetting('layout_use_' + element) == 'true',
             ADDON_VIEW_MODES.get(ADDON.getSetting('layout_type_' + element), '55')
         )
+
+
+def isSettingTrue(settingName):
+    return ADDON.getSetting(settingName) == 'true'
 
 
 def getTitleInfo(title):
