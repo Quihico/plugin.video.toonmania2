@@ -175,7 +175,10 @@ def viewSearchMenu(params):
         return kb.getText() if kb.isConfirmed() else None
 
     if params.get('route', None) == '_inputSearch':
-        text = _modalKeyboard('Search by Name')
+        if params.get('query', '') != '':
+            text = params.get('query')
+        else:
+            text = _modalKeyboard('Search by Name')
         if text:
             _viewSearchResults(params, text) # Sub directory that executes the search and shows results.
             return
@@ -550,7 +553,7 @@ def viewListEpisodes(params):
     # Genres, thumb and plot are taken from the parent show \ movie.
     # But the date of the parent show \ movie will only be used if the individual episode doesn't have a date itself.
     showTitle = jsonData.get('name', '')
-    showGenres = params['genres'].split(',')
+    showGenres = params.get('genres', '').split(',')
     showThumb = params.get('thumb', '') # Might be empty in case 'show_thumbnails' setting is off.
     showPlot = params['plot']
     showDate = params.get('date', '')
